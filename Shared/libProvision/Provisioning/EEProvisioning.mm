@@ -12,6 +12,7 @@
 
 #include <openssl/pem.h>
 #include <openssl/rsa.h>
+#include <openssl/x509.h>
 #include <cstdio>
 #include <iostream>
 
@@ -25,6 +26,38 @@
 #import <UIKit/UIKit.h>  // For device name
 #import "RPVResources.h"
 #endif
+
+static BOOL RPVPrivateKeyMatchesCertificate(NSString *privateKey, NSDictionary *certificateAttributes) {
+    NSString *certificateContent = certificateAttributes[@"certificateContent"];
+    if (privateKey.length == 0 || certificateContent.length == 0) {
+        return NO;
+    }
+
+    NSData *certificateData = [[NSData alloc] initWithBase64EncodedString:certificateContent
+                                                                   options:NSDataBase64DecodingIgnoreUnknownCharacters];
+    if (certificateData.length == 0) {
+        return NO;
+    }
+
+    BIO *privateKeyBIO = BIO_new_mem_buf((void *)privateKey.UTF8String, -1);
+    EVP_PKEY *storedPrivateKey = privateKeyBIO
+        ? PEM_read_bio_PrivateKey(privateKeyBIO, NULL, NULL, NULL)
+        : NULL;
+
+    const unsigned char *certificateBytes = (const unsigned char *)certificateData.bytes;
+    X509 *certificate = d2i_X509(NULL, &certificateBytes, (long)certificateData.length);
+    EVP_PKEY *certificatePublicKey = certificate ? X509_get_pubkey(certificate) : NULL;
+
+    BOOL matches = storedPrivateKey && certificatePublicKey &&
+        EVP_PKEY_cmp(storedPrivateKey, certificatePublicKey) == 1;
+
+    EVP_PKEY_free(certificatePublicKey);
+    X509_free(certificate);
+    EVP_PKEY_free(storedPrivateKey);
+    BIO_free(privateKeyBIO);
+
+    return matches;
+}
 
 @implementation EEProvisioning
 
@@ -306,6 +339,7 @@
         NSString *privateKeyAccount = @"privateKey";
         NSString *privateKey = [SAMKeychain passwordForService:@"jp.soh.reprovision" account:privateKeyAccount];
         NSString *privateKeyAssociatedTeamID = [SAMKeychain passwordForService:@"jp.soh.reprovision" account:@"privateKeyTeamID"];
+        BOOL currentTeamIDMatchesStored = [[[EEAppleServices sharedInstance] currentTeamID] isEqualToString:privateKeyAssociatedTeamID];
 
         BOOL hasValidCertificate = NO;
         NSDate *now = [NSDate date];
@@ -318,11 +352,25 @@
 
             if (machineName != [NSNull null] && [machineName length] > 0) {
                 BOOL shouldCheckForAltStore = [machineName isEqualToString:@"AltStore"] && [RPVResources shouldForceResign];
+                BOOL storedKeyMatchesCertificate = currentTeamIDMatchesStored &&
+                    RPVPrivateKeyMatchesCertificate(privateKey, dict[@"attributes"]);
 
-                if ([machineId isEqualToString:[self _identifierForCurrentMachine]] || shouldCheckForAltStore) {
+                if ([machineId isEqualToString:[self _identifierForCurrentMachine]] ||
+                    shouldCheckForAltStore ||
+                    storedKeyMatchesCertificate) {
                     // Alright cool. Now, we check to see if it has expired.
                     certificate = dict[@"attributes"];
                     certId = dict[@"id"];
+
+                    // Recover a missing certificate UUID by matching its public key.
+                    if (storedKeyMatchesCertificate &&
+                        machineId != (id)[NSNull null] &&
+                        machineId.length > 0 &&
+                        ![machineId isEqualToString:[self _identifierForCurrentMachine]]) {
+                        [SAMKeychain setPassword:machineId
+                                      forService:@"jp.soh.reprovision"
+                                         account:@"uuid"];
+                    }
 
                     // Compare expirationDate to now. If passed, then certificate is not valid.
                     hasValidCertificate = YES;
@@ -342,8 +390,6 @@
                 }
             }
         }
-
-        BOOL currentTeamIDMatchesStored = [[[EEAppleServices sharedInstance] currentTeamID] isEqualToString:privateKeyAssociatedTeamID];
 
         if (!hasValidCertificate || [privateKey isEqualToString:@""] || privateKey == nil || !currentTeamIDMatchesStored) {
             // If the certificate exists already, then revoke.
@@ -685,14 +731,55 @@ free_all:
 
         BOOL appIdExists = NO;
         NSString *appIdIdIfExists = @"";
-        NSString *fullidentifier = @"";
+        NSDictionary *malformedLegacyAppId = nil;
+        NSString *currentTeamID = [[EEAppleServices sharedInstance] currentTeamID];
+        NSString *malformedIdentifier = currentTeamID.length > 0
+            ? [applicationIdentifier stringByAppendingFormat:@".%@", currentTeamID]
+            : @"";
         for (NSDictionary *appIdDictionary in plist[@"appIds"]) {
-            if ([(NSString *)[appIdDictionary objectForKey:@"name"] isEqualToString:applicationName] || [(NSString *)[appIdDictionary objectForKey:@"identifier"] isEqualToString:applicationIdentifier]) {
+            NSString *existingIdentifier = [appIdDictionary objectForKey:@"identifier"];
+            NSString *existingName = [appIdDictionary objectForKey:@"name"];
+
+            // Match App IDs by bundle identifier, not display name.
+            if ([existingIdentifier isEqualToString:applicationIdentifier]) {
                 appIdExists = YES;
                 appIdIdIfExists = [appIdDictionary objectForKey:@"appIdId"];
-                fullidentifier = [appIdDictionary objectForKey:@"identifier"];
                 break;
             }
+
+            // Remove the exact legacy App ID that contains a duplicated team suffix.
+            if ([existingName isEqualToString:applicationName] &&
+                malformedIdentifier.length > 0 &&
+                [existingIdentifier isEqualToString:malformedIdentifier]) {
+                malformedLegacyAppId = appIdDictionary;
+            }
+        }
+
+        if (!appIdExists && malformedLegacyAppId) {
+            [[EEAppleServices sharedInstance] deleteApplicationIdId:[malformedLegacyAppId objectForKey:@"appIdId"]
+                                                             teamID:currentTeamID
+                                                         systemType:systemType
+                                               withCompletionHandler:^(NSError *error, NSDictionary *deleteResult) {
+                if (error) {
+                    NSError *cleanupError = [EEProvisioning _errorFromString:[@"delete malformed App ID: " stringByAppendingString:error.localizedDescription]];
+                    completionHandler(cleanupError, @"", nil);
+                    return;
+                }
+
+                if ([[deleteResult objectForKey:@"resultCode"] intValue] != 0) {
+                    id serverMessage = [deleteResult objectForKey:@"userString"] ?: [deleteResult objectForKey:@"resultString"];
+                    NSError *cleanupError = [EEProvisioning _errorFromString:[NSString stringWithFormat:@"delete malformed App ID: %@", serverMessage ?: @"Unknown server response"]];
+                    completionHandler(cleanupError, @"", nil);
+                    return;
+                }
+
+                [self _addOrUpdateApplicationID:applicationIdentifier
+                                applicationName:applicationName
+                                 binaryLocation:binaryLocation
+                                     systemType:systemType
+                          withCompletionHandler:completionHandler];
+            }];
+            return;
         }
 
         // Setup values for this application.

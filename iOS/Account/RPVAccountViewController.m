@@ -35,6 +35,19 @@
         self.view.backgroundColor = [UIColor systemBackgroundColor];
         self.titleLabel.textColor = [UIColor labelColor];
         self.subtitleLabel.textColor = [UIColor labelColor];
+        self.emailTextField.textColor = [UIColor labelColor];
+        self.passwordTextField.textColor = [UIColor labelColor];
+        self.emailTextField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:self.emailTextField.placeholder ?: @""
+                                                                                       attributes:@{ NSForegroundColorAttributeName: [UIColor tertiaryLabelColor] }];
+        self.passwordTextField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:self.passwordTextField.placeholder ?: @""
+                                                                                          attributes:@{ NSForegroundColorAttributeName: [UIColor tertiaryLabelColor] }];
+
+        for (UIView *subview in self.view.subviews) {
+            if ([subview isKindOfClass:[UILabel class]] &&
+                [((UILabel *)subview).text isEqualToString:@"Your details are only sent to Apple"]) {
+                ((UILabel *)subview).textColor = [UIColor secondaryLabelColor];
+            }
+        }
     } else {
         self.view.backgroundColor = [UIColor whiteColor];
         self.titleLabel.textColor = [UIColor blackColor];

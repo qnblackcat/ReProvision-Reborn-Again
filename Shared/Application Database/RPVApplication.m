@@ -95,7 +95,12 @@
     if (![[NSFileManager defaultManager] fileExistsAtPath:appProvisioningPath]) return NO;
 
     NSDictionary *appProvisioningFile = [RPVApplication provisioningProfileAtPath:appProvisioningPath];
-    if (!appProvisioningFile) return NO;
+    if (![appProvisioningFile isKindOfClass:[NSDictionary class]] || appProvisioningFile.count == 0) return NO;
+
+    if (@available(iOS 15.0, *)) {
+        // Modern iOS may keep the profile only in its installation database.
+        return YES;
+    }
 
     // Check if the same provisioning file exists in "/var/MobileDevice/ProvisioningProfiles".
     NSString *profilesFolderPath = @"/var/MobileDevice/ProvisioningProfiles";
@@ -154,8 +159,15 @@
 }
 
 + (NSDictionary *)provisioningProfileAtPath:(NSString *)path {
-    NSError *err;
+    if (path.length == 0) {
+        return nil;
+    }
+
+    NSError *err = nil;
     NSString *stringContent = [NSString stringWithContentsOfFile:path encoding:NSASCIIStringEncoding error:&err];
+    if (stringContent.length == 0 || err) {
+        return nil;
+    }
 
     NSString *startMarker = @"<plist";
     NSString *endMarker = @"</plist>";
@@ -174,6 +186,9 @@
     stringContent = [stringContent substringWithRange:NSMakeRange(startRange.location, length)];
 
     NSData *stringData = [stringContent dataUsingEncoding:NSUTF8StringEncoding];
+    if (!stringData) {
+        return nil;
+    }
 
     NSError *error;
     NSPropertyListFormat format;

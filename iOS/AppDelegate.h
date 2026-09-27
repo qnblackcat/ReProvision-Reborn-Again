@@ -15,6 +15,7 @@
 @property (strong, nonatomic) UIWindow *window;
 
 - (void)requestDebuggingBackgroundSigning;
+- (void)requestDebuggingBackgroundSigningWithCompletion:(void (^)(NSError *error))completionHandler;
 - (void)requestPreferencesUpdate;
 
 @end

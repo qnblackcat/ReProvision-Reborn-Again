@@ -8,12 +8,15 @@
 
 #import "RPVAdvancedController.h"
 #import "AppDelegate.h"
+#import "RPVErrors.h"
 #import "RPVResources.h"
 
 #include <notify.h>
 
 @interface RPVAdvancedController ()
 @property (nonatomic, readwrite) int daemonNotificationToken;
+@property (nonatomic, strong) PSSpecifier *backgroundSigningTestSpecifier;
+@property (nonatomic, readwrite) BOOL backgroundSigningTestInProgress;
 @end
 
 @implementation RPVAdvancedController
@@ -81,9 +84,9 @@
 
     [array addObject:forceResign];
 
-    PSSpecifier *trueBgResign = [PSSpecifier preferenceSpecifierNamed:@"True Background Re-sign (Beta)" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
+    PSSpecifier *trueBgResign = [PSSpecifier preferenceSpecifierNamed:@"Wake for Background Re-sign" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSSwitchCell edit:nil];
     [trueBgResign setProperty:@"trueBgResign" forKey:@"key"];
-    [trueBgResign setProperty:@0 forKey:@"default"];
+    [trueBgResign setProperty:@1 forKey:@"default"];
 
     [array addObject:trueBgResign];
 
@@ -122,6 +125,7 @@
 
     PSSpecifier *startBackgroundSign = [PSSpecifier preferenceSpecifierNamed:@"Initiate Background Signing" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
     startBackgroundSign->action = @selector(startBackgroundSign:);
+    self.backgroundSigningTestSpecifier = startBackgroundSign;
 
     [array addObject:startBackgroundSign];
 
@@ -179,7 +183,7 @@
         } else if ([key isEqualToString:@"forceResign"]) {
             return [NSNumber numberWithBool:YES];
         } else if ([key isEqualToString:@"trueBgResign"]) {
-            return [NSNumber numberWithBool:NO];
+            return [NSNumber numberWithBool:YES];
         } else if ([key isEqualToString:@"heartbeatTimerInterval"]) {
             return [NSNumber numberWithInt:2];
         } else if ([key isEqualToString:@"shouldAutoRevokeIfNeeded"]) {
@@ -204,7 +208,42 @@
 /////////////////////////////////////////////////////////////////////////////////////
 
 - (void)startBackgroundSign:(id)sender {
-    [(AppDelegate *)[UIApplication sharedApplication].delegate requestDebuggingBackgroundSigning];
+    if (self.backgroundSigningTestInProgress)
+        return;
+
+    self.backgroundSigningTestInProgress = YES;
+    [self.backgroundSigningTestSpecifier setName:@"Background Signing Running\u2026"];
+    [self reloadSpecifier:self.backgroundSigningTestSpecifier animated:YES];
+
+    __weak RPVAdvancedController *weakSelf = self;
+    [(AppDelegate *)[UIApplication sharedApplication].delegate
+        requestDebuggingBackgroundSigningWithCompletion:^(NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                RPVAdvancedController *strongSelf = weakSelf;
+                if (!strongSelf)
+                    return;
+
+                strongSelf.backgroundSigningTestInProgress = NO;
+                [strongSelf.backgroundSigningTestSpecifier setName:@"Initiate Background Signing"];
+                [strongSelf reloadSpecifier:strongSelf.backgroundSigningTestSpecifier animated:YES];
+
+                // AppDelegate posts the result when Settings is backgrounded.
+                BOOL noSigningRequired = error && error.code == RPVErrorNoSigningRequired;
+                NSString *title = (!error || noSigningRequired) ? @"Background Signing Works" : @"Background Signing Failed";
+                NSString *message = noSigningRequired
+                    ? @"The daemon completed the background check. No applications need signing right now."
+                    : (error ? error.localizedDescription : @"The daemon completed the background signing test successfully.");
+
+                if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive)
+                    return;
+
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                               message:message
+                                                                        preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                [strongSelf presentViewController:alert animated:YES completion:nil];
+            });
+        }];
 }
 
 @end

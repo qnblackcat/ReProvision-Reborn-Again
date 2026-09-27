@@ -483,6 +483,10 @@ static std::streamsize read(std::streambuf &stream, void *data, size_t size) {
     return writ;
 }
 
+static inline void put(std::streambuf &stream, uint8_t value) {
+    _assert(stream.sputc(value) != EOF);
+}
+
 static inline void get(std::streambuf &stream, void *data, size_t size) {
     _assert(read(stream, data, size) == size);
 }
@@ -499,6 +503,10 @@ static inline void put(std::streambuf &stream, const void *data, size_t size, co
         total += writ;
         percent(double(total) / size);
     }
+}
+
+static inline void put(std::streambuf &stream, const std::string &data) {
+    put(stream, data.data(), data.size());
 }
 
 static size_t most(std::streambuf &stream, void *data, size_t size) {
@@ -526,6 +534,182 @@ Type_ Align(Type_ value, size_t align) {
 
 static const uint8_t PageShift_(0x0c);
 static const uint32_t PageSize_(1 << PageShift_);
+
+// Modern signatures store DER entitlements in slot 7. Encode variable lengths
+// and sort dictionary members as required by DER.
+static inline unsigned bytes(uint64_t value) {
+    if (!value)
+        return 1;
+    return (64 - __builtin_clzll(value) + 7) / 8;
+}
+
+static void put(std::streambuf &stream, uint64_t value, size_t length) {
+    length *= 8;
+    do {
+        put(stream, uint8_t(value >> (length -= 8)));
+    } while (length != 0);
+}
+
+static void der(std::streambuf &stream, uint64_t value) {
+    if (value < 128) {
+        put(stream, uint8_t(value));
+    } else {
+        unsigned length(bytes(value));
+        put(stream, uint8_t(0x80 | length));
+        put(stream, value, length);
+    }
+}
+
+static std::string der(uint8_t tag, const char *value, size_t length) {
+    std::stringbuf data;
+    put(data, tag);
+    der(data, length);
+    put(data, value, length);
+    return data.str();
+}
+
+static std::string der(uint8_t tag, const char *value) {
+    return der(tag, value, strlen(value));
+}
+
+static std::string der(uint8_t tag, const std::string &value) {
+    return der(tag, value.data(), value.size());
+}
+
+template <typename Type_>
+static void der_(std::stringbuf &data, const Type_ &values) {
+    size_t size(0);
+    for (const auto &value : values)
+        size += value.size();
+    der(data, size);
+    for (const auto &value : values)
+        put(data, value);
+}
+
+static std::string der(const std::vector<std::string> &values) {
+    std::stringbuf data;
+    put(data, uint8_t(0x30));
+    der_(data, values);
+    return data.str();
+}
+
+static std::string der(const std::multiset<std::string> &values) {
+    std::stringbuf data;
+    put(data, uint8_t(0x31));
+    der_(data, values);
+    return data.str();
+}
+
+static std::string der(const std::pair<std::string, std::string> &value) {
+    const auto key(der(0x0c, value.first));
+    std::stringbuf data;
+    put(data, uint8_t(0x30));
+    der(data, key.size() + value.second.size());
+    put(data, key);
+    put(data, value.second);
+    return data.str();
+}
+
+static std::string der(plist_t data) {
+    switch (const auto type = plist_get_node_type(data)) {
+        case PLIST_BOOLEAN: {
+            uint8_t value(0);
+            plist_get_bool_val(data, &value);
+
+            std::stringbuf encoded;
+            put(encoded, uint8_t(0x01));
+            der(encoded, 1);
+            put(encoded, uint8_t(value != 0 ? 1 : 0));
+            return encoded.str();
+        }
+
+        case PLIST_UINT: {
+            uint64_t value(0);
+            plist_get_uint_val(data, &value);
+            const auto length(bytes(value));
+
+            std::stringbuf encoded;
+            put(encoded, uint8_t(0x02));
+            der(encoded, length);
+            put(encoded, value, length);
+            return encoded.str();
+        }
+
+        case PLIST_DATA: {
+            char *value(NULL);
+            uint64_t length(0);
+            plist_get_data_val(data, &value, &length);
+            _scope({ free(value); });
+            return der(0x04, value, length);
+        }
+
+        case PLIST_STRING: {
+            char *value(NULL);
+            plist_get_string_val(data, &value);
+            _scope({ free(value); });
+            return der(0x0c, value);
+        }
+
+        case PLIST_ARRAY: {
+            std::vector<std::string> values;
+            for (auto count(plist_array_get_size(data)), index(decltype(count)(0)); index != count; ++index)
+                values.push_back(der(plist_array_get_item(data, index)));
+            return der(values);
+        }
+
+        case PLIST_DICT: {
+            std::multiset<std::string> values;
+            plist_dict_iter iterator(NULL);
+            plist_dict_new_iter(data, &iterator);
+            _scope({ free(iterator); });
+
+            for (;;) {
+                char *key(NULL);
+                plist_t value(NULL);
+                plist_dict_next_item(data, iterator, &key, &value);
+                if (key == NULL)
+                    break;
+                _scope({ free(key); });
+                values.insert(der(std::make_pair(key, der(value))));
+            }
+
+            return der(values);
+        }
+
+        case PLIST_REAL:
+        case PLIST_DATE:
+        default:
+            _assert_(false, "unsupported entitlement plist type: %d", type);
+            return std::string();
+    }
+}
+
+static plist_t EntitlementsPlist(const std::string &entitlements) {
+    plist_t plist(NULL);
+    plist_from_xml(entitlements.data(), (uint32_t)entitlements.size(), &plist);
+    _assert(plist != NULL);
+    _assert(plist_get_node_type(plist) == PLIST_DICT);
+    return plist;
+}
+
+static std::string DEREntitlements(const std::string &entitlements) {
+    if (entitlements.empty())
+        return std::string();
+
+    plist_t plist(EntitlementsPlist(entitlements));
+    _scope({ plist_free(plist); });
+    return der(plist);
+}
+
+static bool EntitlementIsTrue(plist_t entitlements, const char *key) {
+    plist_t item(plist_dict_get_item(entitlements, key));
+    if (item == NULL || plist_get_node_type(item) != PLIST_BOOLEAN)
+        return false;
+
+    uint8_t value(0);
+    plist_get_bool_val(item, &value);
+    return value != 0;
+}
 
 static inline uint16_t Swap_(uint16_t value) {
     return
@@ -810,7 +994,7 @@ class FatHeader :
 #define CSMAGIC_EMBEDDED_SIGNATURE        uint32_t(0xfade0cc0)
 #define CSMAGIC_EMBEDDED_SIGNATURE_OLD    uint32_t(0xfade0b02)
 #define CSMAGIC_EMBEDDED_ENTITLEMENTS     uint32_t(0xfade7171)
-#define CSMAGIC_EMBEDDED_RAW_ENTITLEMENTS uint32_t(0xfade7172)
+#define CSMAGIC_EMBEDDED_DER_ENTITLEMENTS uint32_t(0xfade7172)
 #define CSMAGIC_DETACHED_SIGNATURE        uint32_t(0xfade0cc1)
 #define CSMAGIC_BLOBWRAPPER               uint32_t(0xfade0b01)
 
@@ -820,7 +1004,7 @@ class FatHeader :
 #define CSSLOT_RESOURCEDIR      uint32_t(0x00003)
 #define CSSLOT_APPLICATION      uint32_t(0x00004)
 #define CSSLOT_ENTITLEMENTS     uint32_t(0x00005)
-#define CSSLOT_RAW_ENTITLEMENTS uint32_t(0x00007)
+#define CSSLOT_DER_ENTITLEMENTS uint32_t(0x00007)
 #define CSSLOT_ALTERNATE        uint32_t(0x01000)
 
 #define CSSLOT_SIGNATURESLOT uint32_t(0x10000)
@@ -832,6 +1016,13 @@ class FatHeader :
 
 #define CS_EXECSEG_MAIN_BINARY      0x1
 #define CS_EXECSEG_ALLOW_UNSIGNED   0x10
+#define CS_EXECSEG_DEBUGGER         0x20
+#define CS_EXECSEG_JIT              0x40
+#define CS_EXECSEG_SKIP_LIBRARY_VAL 0x80
+#define CS_EXECSEG_CAN_LOAD_CDHASH  0x100
+#define CS_EXECSEG_CAN_EXEC_CDHASH  0x200
+
+#define CS_ADHOC                    0x2
 
 struct BlobIndex {
     uint32_t type;
@@ -848,183 +1039,6 @@ struct SuperBlob {
     uint32_t count;
     struct BlobIndex index[];
 } _packed;
-
-struct EntitlementValue
-{
-    enum struct Type : uint8_t
-    {
-        Boolean = 0x01,
-        String =  0x0c,
-    };
-    
-    Type type;
-    uint8_t length; // Excludes .type and .length
-    std::string value;
-    
-    EntitlementValue(Type type, std::string value) : type(type), length(value.length()), value(value)
-    {
-    }
-    
-    uint8_t totalLength()
-    {
-        return this->length + 2;
-    }
-    
-    std::string data()
-    {
-        std::stringbuf data;
-        
-        put(data, (char *)&this->type, 1);
-        put(data, (char *)&this->length, 1);
-        put(data, this->value.c_str(), this->value.length());
-        
-        return data.str();
-    }
-};
-
-struct EntitlementBlob
-{
-    uint8_t padding = 0x30;
-    uint8_t length; // Excludes .padding and .length
-    
-    EntitlementValue key;
-    std::vector<EntitlementValue> values = {};
-        
-    EntitlementBlob(std::string key, std::string v) : key(EntitlementValue::Type::String, key)
-    {
-        EntitlementValue value(EntitlementValue::Type::String, v);
-        this->values.push_back(value);
-        
-        this->length = this->key.totalLength() + value.totalLength();
-    }
-    
-    EntitlementBlob(std::string key, bool v) : key(EntitlementValue::Type::String, key)
-    {
-        EntitlementValue value(EntitlementValue::Type::Boolean, v ? "\1" : "\0");
-        this->values.push_back(value);
-        
-        this->length = this->key.totalLength() + value.totalLength();
-    }
-    
-    EntitlementBlob(std::string key, std::vector<std::string> values) : key(EntitlementValue::Type::String, key), isArray(true)
-    {
-        int8_t valuesLength = 0;
-        for (auto &value : values)
-        {
-            EntitlementValue entitlementValue(EntitlementValue::Type::String, value);
-            this->values.push_back(entitlementValue);
-            
-            valuesLength += entitlementValue.totalLength();
-        }
-        
-        this->length = this->key.totalLength() + valuesLength + 2; // Arrays require 2 extra bytes.
-    }
-    
-    uint8_t totalLength()
-    {
-        return this->length + 2;
-    }
-    
-    std::string data()
-    {
-        std::stringbuf data;
-        put(data, (char *)&this->padding, 1);
-        put(data, (char *)&this->length, 1);
-        put(data, this->key.data().data(), this->key.totalLength());
-        
-        if (this->isArray)
-        {
-            // Arrays need 2 extra bytes:
-            // - 0x30
-            // - Total length of all values in array (including their 2 byte headers)
-            
-            int8_t padding = 0x30;
-            int8_t length = 0;
-            
-            for (auto &value : this->values)
-            {
-                length += value.totalLength();
-            }
-            
-            put(data, (char *)&padding, 1);
-            put(data, (char *)&length, 1);
-        }
-        
-        for (auto &value : this->values)
-        {
-            put(data, value.data().data(), value.totalLength());
-        }
-        
-        return data.str();
-    }
-    
-private:
-    bool isArray = false;
-};
-
-struct EntitlementsSuperBlob
-{
-    uint32_t magic = CSMAGIC_EMBEDDED_RAW_ENTITLEMENTS;
-    uint32_t length; // Total length, _including_ .magic and .length
-    
-    uint8_t byte1 = 0x31;
-    uint8_t byte2;
-    
-    uint16_t blobsLength;
-    std::vector<EntitlementBlob> blobs;
-    
-    EntitlementsSuperBlob(std::vector<EntitlementBlob> blobs) : blobs(blobs)
-    {
-        uint32_t blobsLength = 0;
-        for (auto &blob : blobs)
-        {
-            blobsLength += blob.totalLength();
-        }
-        
-        this->blobsLength = blobsLength;
-        
-        if (this->blobsLength > UCHAR_MAX)
-        {
-            this->length = blobsLength + 10 + 2; // blobsLength is > 255, so we need 2 bytes to encode it.
-            this->byte2 = 0x82;
-        }
-        else
-        {
-            this->length = blobsLength + 10 + 1; // blobsLength is <= 255, so we only need 1 byte to encode it.
-            this->byte2 = 0x81;
-        }
-    }
-    
-    std::string data()
-    {
-        std::stringbuf data;
-        
-        uint32_t swappedMagic = Swap(this->magic);
-        uint32_t swappedLength = Swap(this->length);
-        
-        put(data, (char *)&swappedMagic, 4);
-        put(data, (char *)&swappedLength, 4);
-        put(data, (char *)&this->byte1, 1);
-        put(data, (char *)&this->byte2, 1);
-        
-        if (this->blobsLength > UCHAR_MAX)
-        {
-            uint32_t swappedBlobsLength = Swap(this->blobsLength);
-            put(data, (char *)&swappedBlobsLength, 2);
-        }
-        else
-        {
-            put(data, (char *)&this->blobsLength, 1);
-        }
-                
-        for (auto &blob : this->blobs)
-        {
-            put(data, blob.data().data(), blob.totalLength());
-        }
-        
-        return data.str();
-    }
-};
 
 struct CodeDirectory {
     uint32_t version;
@@ -1125,9 +1139,10 @@ static const std::vector<Algorithm *> &GetAlgorithms() {
     static AlgorithmSHA1 sha1;
     static AlgorithmSHA256 sha256;
 
+    // Use the strongest hash for the primary CodeDirectory on iOS 15 and later.
     static Algorithm *array[] = {
-        &sha1,
         &sha256,
+        &sha1,
     };
 
     static std::vector<Algorithm *> algorithms(array, array + sizeof(array) / sizeof(array[0]));
@@ -1796,6 +1811,7 @@ namespace ldid {
 
 Hash Sign(const void *idata, size_t isize, std::streambuf &output, const std::string &identifier, const std::string &entitlements, const std::string &requirement, const std::string &key, const Slots &slots, const Functor<void (double)> &percent) {
     Hash hash;
+    const std::string derEntitlements(DEREntitlements(entitlements));
 
     std::string team;
 
@@ -1848,10 +1864,11 @@ Hash Sign(const void *idata, size_t isize, std::streambuf &output, const std::st
             alloc += entitlements.size();
         }
         
-        if (!entitlements.empty())
-        {
-            // TODO: Calculate exact amount necessary to embed raw entitlements.
-            alloc += entitlements.length(); // Overestimate
+        if (!derEntitlements.empty()) {
+            special = std::max(special, CSSLOT_DER_ENTITLEMENTS);
+            alloc += sizeof(struct BlobIndex);
+            alloc += sizeof(struct Blob);
+            alloc += derEntitlements.size();
         }
 
         size_t directory(0);
@@ -1876,7 +1893,9 @@ Hash Sign(const void *idata, size_t isize, std::streambuf &output, const std::st
         return alloc;
     }), fun([&](const MachHeader &mach_header, std::streambuf &output, size_t limit, size_t execSegLimit, const std::string &overlap, const char *top, const Functor<void (double)> &percent) -> size_t {
         Blobs blobs;
-        uint64_t execSegFlags = 0;
+        uint64_t execSegFlags = mach_header.Swap(mach_header->filetype) == MH_EXECUTE
+            ? CS_EXECSEG_MAIN_BINARY
+            : 0;
 
         if (true) {
             std::stringbuf data;
@@ -1895,98 +1914,28 @@ Hash Sign(const void *idata, size_t isize, std::streambuf &output, const std::st
             std::stringbuf data;
             put(data, entitlements.data(), entitlements.size());
             insert(blobs, CSSLOT_ENTITLEMENTS, CSMAGIC_EMBEDDED_ENTITLEMENTS, data);
-            if (entitlements.find("<key>get-task-allow</key>") != std::string::npos) {
-                // TODO: parse entitlements, avoid cases where `get-task-allow` is false or appears elsewhere
-                execSegFlags = CS_EXECSEG_MAIN_BINARY | CS_EXECSEG_ALLOW_UNSIGNED;
-            }
+            plist_t plist(EntitlementsPlist(entitlements));
+            _scope({ plist_free(plist); });
+
+            if (EntitlementIsTrue(plist, "get-task-allow") ||
+                EntitlementIsTrue(plist, "run-unsigned-code"))
+                execSegFlags |= CS_EXECSEG_ALLOW_UNSIGNED;
+            if (EntitlementIsTrue(plist, "com.apple.private.cs.debugger"))
+                execSegFlags |= CS_EXECSEG_DEBUGGER;
+            if (EntitlementIsTrue(plist, "dynamic-codesigning"))
+                execSegFlags |= CS_EXECSEG_JIT;
+            if (EntitlementIsTrue(plist, "com.apple.private.skip-library-validation"))
+                execSegFlags |= CS_EXECSEG_SKIP_LIBRARY_VAL;
+            if (EntitlementIsTrue(plist, "com.apple.private.amfi.can-load-cdhash"))
+                execSegFlags |= CS_EXECSEG_CAN_LOAD_CDHASH;
+            if (EntitlementIsTrue(plist, "com.apple.private.amfi.can-execute-cdhash"))
+                execSegFlags |= CS_EXECSEG_CAN_EXEC_CDHASH;
         }
-        
-        if (!entitlements.empty())
-        {
-            std::vector<EntitlementBlob> entitlementBlobs;
-            
-            plist_t plist = NULL;
-            plist_from_xml(entitlements.data(), (uint32_t)entitlements.length(), &plist);
-            
-            plist_dict_iter it = NULL;
-            plist_dict_new_iter(plist, &it);
-            
-            char *key = NULL;
-            plist_t node = NULL;
-            plist_dict_next_item(plist, it, &key, &node);
-            
-            while (node)
-            {
-                plist_type type = plist_get_node_type(node);
-                switch (type)
-                {
-                    case PLIST_STRING:
-                    {
-                        char *value = NULL;
-                        plist_get_string_val(node, &value);
-                        
-                        EntitlementBlob blob(key, std::string(value)); // Explicitly cast value to std::string or else it will (annoyingly) call bool constructor.
-                        entitlementBlobs.push_back(blob);
-                        
-                        free(value);
-                        
-                        break;
-                    }
-                        
-                    case PLIST_BOOLEAN:
-                    {
-                        uint8_t value = 0;
-                        plist_get_bool_val(node, &value);
-                        
-                        EntitlementBlob blob(key, value != 0);
-                        entitlementBlobs.push_back(blob);
-                        break;
-                    }
-                        
-                    case PLIST_ARRAY:
-                    {
-                        std::vector<std::string> values;
-                        
-                        int size = plist_array_get_size(node);
-                        for (int i = 0; i < size; i++)
-                        {
-                            plist_t subnode = plist_array_get_item(node, i);
-                            
-                            char *value = NULL;
-                            plist_get_string_val(subnode, &value);
-                            
-                            values.push_back(value);
-                            
-                            free(value);
-                        }
-                        
-                        EntitlementBlob blob(key, values);
-                        entitlementBlobs.push_back(blob);
-                        break;
-                    }
-                        
-                    default:
-                    {
-                        printf("[ldid] Unsupported entitlement type: %d\n", type);
-                        break;
-                    }
-                }
-                
-                free(key);
-                key = NULL;
-                
-                plist_dict_next_item(plist, it, &key, &node);
-            }
-            
-            free(it);
-            plist_free(plist);
 
+        if (!derEntitlements.empty()) {
             std::stringbuf data;
-
-            EntitlementsSuperBlob superBlob(entitlementBlobs);
-            put(data, superBlob.data().data(), superBlob.length);
-
-            insert(blobs, CSSLOT_RAW_ENTITLEMENTS, data);
+            put(data, derEntitlements);
+            insert(blobs, CSSLOT_DER_ENTITLEMENTS, CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, data);
         }
 
         Slots posts(slots);
@@ -2014,7 +1963,7 @@ Hash Sign(const void *idata, size_t isize, std::streambuf &output, const std::st
 
             CodeDirectory directory;
             directory.version = Swap(uint32_t(0x00020400));
-            directory.flags = Swap(uint32_t(0));
+            directory.flags = Swap(uint32_t(key.empty() ? CS_ADHOC : 0));
             directory.nSpecialSlots = Swap(special);
             directory.codeLimit = Swap(uint32_t(limit));
             directory.nCodeSlots = Swap(normal);
@@ -2505,28 +2454,27 @@ Bundle Sign(const std::string &root, Folder &folder, const std::string &key, std
     const std::string resources(mac ? "Resources/" : "");
 
     if (true) {
-        rules1.insert(Rule{1, NoMode, "^" + resources});
-        if (!mac) rules1.insert(Rule{10000, OmitMode, "^(Frameworks/[^/]+\\.framework/|PlugIns/[^/]+\\.appex/|PlugIns/[^/]+\\.appex/Frameworks/[^/]+\\.framework/|())SC_Info/[^/]+\\.(sinf|supf|supp)$"});
+        rules1.insert(Rule{1, NoMode, "^" + (resources.empty() ? ".*" : resources)});
         rules1.insert(Rule{1000, OptionalMode, "^" + resources + ".*\\.lproj/"});
         rules1.insert(Rule{1100, OmitMode, "^" + resources + ".*\\.lproj/locversion.plist$"});
-        if (!mac) rules1.insert(Rule{10000, OmitMode, "^Watch/[^/]+\\.app/(Frameworks/[^/]+\\.framework/|PlugIns/[^/]+\\.appex/|PlugIns/[^/]+\\.appex/Frameworks/[^/]+\\.framework/)SC_Info/[^/]+\\.(sinf|supf|supp)$"});
+        rules1.insert(Rule{1010, NoMode, "^" + resources + "Base\\.lproj/"});
         rules1.insert(Rule{1, NoMode, "^version.plist$"});
     }
 
     if (true) {
         rules2.insert(Rule{11, NoMode, ".*\\.dSYM($|/)"});
-        rules2.insert(Rule{20, NoMode, "^" + resources});
+        if (mac) rules2.insert(Rule{20, NoMode, "^" + resources});
         rules2.insert(Rule{2000, OmitMode, "^(.*/)?\\.DS_Store$"});
-        if (!mac) rules2.insert(Rule{10000, OmitMode, "^(Frameworks/[^/]+\\.framework/|PlugIns/[^/]+\\.appex/|PlugIns/[^/]+\\.appex/Frameworks/[^/]+\\.framework/|())SC_Info/[^/]+\\.(sinf|supf|supp)$"});
-        rules2.insert(Rule{10, NestedMode, "^(Frameworks|SharedFrameworks|PlugIns|Plug-ins|XPCServices|Helpers|MacOS|Library/(Automator|Spotlight|LoginItems))/"});
+        if (mac) rules2.insert(Rule{10, NestedMode, "^(Frameworks|SharedFrameworks|PlugIns|Plug-ins|XPCServices|Helpers|MacOS|Library/(Automator|Spotlight|LoginItems))/"});
         rules2.insert(Rule{1, NoMode, "^.*"});
         rules2.insert(Rule{1000, OptionalMode, "^" + resources + ".*\\.lproj/"});
         rules2.insert(Rule{1100, OmitMode, "^" + resources + ".*\\.lproj/locversion.plist$"});
+        if (!mac) rules2.insert(Rule{1010, NoMode, "^Base\\.lproj/"});
         rules2.insert(Rule{20, OmitMode, "^Info\\.plist$"});
         rules2.insert(Rule{20, OmitMode, "^PkgInfo$"});
-        if (!mac) rules2.insert(Rule{10000, OmitMode, "^Watch/[^/]+\\.app/(Frameworks/[^/]+\\.framework/|PlugIns/[^/]+\\.appex/|PlugIns/[^/]+\\.appex/Frameworks/[^/]+\\.framework/)SC_Info/[^/]+\\.(sinf|supf|supp)$"});
-        rules2.insert(Rule{10, NestedMode, "^[^/]+$"});
+        if (mac) rules2.insert(Rule{10, NestedMode, "^[^/]+$"});
         rules2.insert(Rule{20, NoMode, "^embedded\\.provisionprofile$"});
+        if (mac) rules2.insert(Rule{1010, NoMode, "^" + resources + "Base\\.lproj/"});
         rules2.insert(Rule{20, NoMode, "^version\\.plist$"});
     }
 

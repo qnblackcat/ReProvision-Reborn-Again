@@ -44,12 +44,12 @@ static CGFloat inset = 20;
 
     if(!self.button) {
         self.button = [UIButton buttonWithType:UIButtonTypeCustom];
-        self.button.backgroundColor = [UIColor colorWithRed:240.0/255.0 green:240.0/255.0 blue:248.0/255.0 alpha:1.0];
+        self.button.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
 
         [self.button setTitle:@"Add" forState:UIControlStateNormal];
 
-        [self.button setTitleColor:[UIColor colorWithRed:0.0/255.0 green:122.0/255.0 blue:255.0/255.0 alpha:1.0] forState:UIControlStateNormal];
-        [self.button setTitleColor:[UIColor colorWithRed:0.0/255.0 green:122.0/255.0 blue:255.0/255.0 alpha:0.5] forState:UIControlStateHighlighted];
+        [self.button setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+        [self.button setTitleColor:[[UIColor systemBlueColor] colorWithAlphaComponent:0.5] forState:UIControlStateHighlighted];
 
         self.button.titleLabel.font = [UIFont boldSystemFontOfSize:14];
 

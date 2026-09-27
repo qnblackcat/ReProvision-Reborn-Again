@@ -12,6 +12,7 @@
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UIButton *button;
 @property (nonatomic, strong) UIView *seperatorLine;
+@property (nonatomic, strong) CAGradientLayer *buttonGradientLayer;
 
 @property (nonatomic, readwrite) NSInteger section;
 @property (nonatomic, weak) id<RPVInstalledSectionHeaderDelegate> delegate;
@@ -19,6 +20,34 @@
 @end
 
 @implementation RPVInstalledSectionHeaderView
+
+- (void)_updateButtonGradientForCurrentAppearance {
+    if (!self.buttonGradientLayer) {
+        return;
+    }
+
+    BOOL darkMode = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+    UIColor *startColor = darkMode
+        ? [UIColor colorWithRed:52.0 / 255.0 green:31.0 / 255.0 blue:86.0 / 255.0 alpha:1.0]
+        : [UIColor colorWithRed:147.0 / 255.0 green:99.0 / 255.0 blue:207.0 / 255.0 alpha:1.0];
+    UIColor *endColor = darkMode
+        ? [UIColor colorWithRed:24.0 / 255.0 green:52.0 / 255.0 blue:70.0 / 255.0 alpha:1.0]
+        : [UIColor colorWithRed:116.0 / 255.0 green:158.0 / 255.0 blue:201.0 / 255.0 alpha:1.0];
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.buttonGradientLayer.colors = @[(id)startColor.CGColor, (id)endColor.CGColor];
+    [CATransaction commit];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+
+    if (!previousTraitCollection ||
+        [self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection]) {
+        [self _updateButtonGradientForCurrentAppearance];
+    }
+}
 
 - (void)_configureViewsIfNecessary {
     if (!self.titleLabel) {
@@ -32,7 +61,7 @@
 
     if (!self.button) {
         self.button = [UIButton buttonWithType:UIButtonTypeCustom];
-        self.button.backgroundColor = [UIColor colorWithRed:240.0/255.0 green:240.0/255.0 blue:248.0/255.0 alpha:1.0];
+        self.button.backgroundColor = [UIColor tertiarySystemGroupedBackgroundColor];
 
         [self.button setTitle:@"Sign" forState:UIControlStateNormal];
 
@@ -54,7 +83,7 @@
 
     if (!self.seperatorLine) {
         self.seperatorLine = [[UIView alloc] initWithFrame:CGRectZero];
-        self.seperatorLine.backgroundColor = [UIColor colorWithRed:227.0/255.0 green:227.0/255.0 blue:227.0/255.0 alpha:1.0];
+        self.seperatorLine.backgroundColor = [UIColor separatorColor];
 
         [self addSubview:self.seperatorLine];
     }
@@ -103,26 +132,23 @@
     if (invertColours) {
         self.titleLabel.textColor = [UIColor whiteColor];
 
-        self.button.backgroundColor = [UIColor whiteColor];
+        self.button.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
         self.tintColor = [UIColor colorWithRed:147.0/255.0 green:99.0/255.0 blue:207.0/255.0 alpha:1.0];
         [self.button setTitleColor:self.tintColor forState:UIControlStateNormal];
         [self.button setTitleColor:self.tintColor forState:UIControlStateHighlighted];
     } else {
-        self.titleLabel.textColor = [UIColor blackColor];
-        self.button.backgroundColor = [UIColor whiteColor];
+        self.titleLabel.textColor = [UIColor labelColor];
+        self.button.backgroundColor = [UIColor clearColor];
 
         // Add gradient
-        CAGradientLayer *gradient = [CAGradientLayer layer];
-        gradient.frame = self.button.bounds;
-        gradient.cornerRadius = self.button.layer.cornerRadius;
+        self.buttonGradientLayer = [CAGradientLayer layer];
+        self.buttonGradientLayer.frame = self.button.bounds;
+        self.buttonGradientLayer.cornerRadius = self.button.layer.cornerRadius;
+        self.buttonGradientLayer.startPoint = CGPointMake(1.0, 0.5);
+        self.buttonGradientLayer.endPoint = CGPointMake(0.0, 0.5);
+        [self _updateButtonGradientForCurrentAppearance];
 
-        UIColor *startColor = [UIColor colorWithRed:147.0/255.0 green:99.0/255.0 blue:207.0/255.0 alpha:1.0];
-        UIColor *endColor = [UIColor colorWithRed:116.0/255.0 green:158.0/255.0 blue:201.0/255.0 alpha:1.0];
-        gradient.colors = @[(id)startColor.CGColor, (id)endColor.CGColor];
-        gradient.startPoint = CGPointMake(1.0, 0.5);
-        gradient.endPoint = CGPointMake(0.0, 0.5);
-
-        [self.button.layer insertSublayer:gradient atIndex:0];
+        [self.button.layer insertSublayer:self.buttonGradientLayer atIndex:0];
 
         // Button colouration
         [self.button setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];

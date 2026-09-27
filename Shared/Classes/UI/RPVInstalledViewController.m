@@ -96,6 +96,30 @@
 
 @implementation RPVInstalledViewController
 
+- (void)_updateTopBackgroundForCurrentAppearance {
+    BOOL darkMode = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+    UIColor *startColor = darkMode
+        ? [UIColor colorWithRed:52.0 / 255.0 green:31.0 / 255.0 blue:86.0 / 255.0 alpha:1.0]
+        : [UIColor colorWithRed:147.0 / 255.0 green:99.0 / 255.0 blue:207.0 / 255.0 alpha:1.0];
+    UIColor *endColor = darkMode
+        ? [UIColor colorWithRed:24.0 / 255.0 green:52.0 / 255.0 blue:70.0 / 255.0 alpha:1.0]
+        : [UIColor colorWithRed:116.0 / 255.0 green:158.0 / 255.0 blue:201.0 / 255.0 alpha:1.0];
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.topBackgroundGradientLayer.colors = @[(id)startColor.CGColor, (id)endColor.CGColor];
+    [CATransaction commit];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+
+    if (!previousTraitCollection ||
+        [self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection]) {
+        [self _updateTopBackgroundForCurrentAppearance];
+    }
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
 
@@ -146,7 +170,8 @@
     self.rootScrollView.backgroundColor = [UIColor clearColor];
 #else
     self.rootScrollView = [[UIScrollView alloc] initWithFrame:CGRectZero];
-    self.rootScrollView.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1.0];
+    self.rootScrollView.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
 #endif
     self.rootScrollView.delegate = self;
     self.rootScrollView.alwaysBounceVertical = YES;
@@ -164,9 +189,7 @@
     self.topBackgroundGradientLayer = [CAGradientLayer layer];
     self.topBackgroundGradientLayer.frame = CGRectZero;
 
-    UIColor *startColor = [UIColor colorWithRed:147.0 / 255.0 green:99.0 / 255.0 blue:207.0 / 255.0 alpha:1.0];
-    UIColor *endColor = [UIColor colorWithRed:116.0 / 255.0 green:158.0 / 255.0 blue:201.0 / 255.0 alpha:1.0];
-    self.topBackgroundGradientLayer.colors = @[(id)startColor.CGColor, (id)endColor.CGColor];
+    [self _updateTopBackgroundForCurrentAppearance];
     self.topBackgroundGradientLayer.startPoint = CGPointMake(0.75, 0.75);
     self.topBackgroundGradientLayer.endPoint = CGPointMake(0.25, 0.25);
 

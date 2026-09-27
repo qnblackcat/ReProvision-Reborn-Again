@@ -75,6 +75,10 @@
 // Data source
 @property (nonatomic, strong) RPVApplication *application;
 
+// Progress and pipeline completion can both close the overlay, so teardown is idempotent.
+@property (nonatomic, readwrite) BOOL signingCompletionHandled;
+@property (nonatomic, readwrite) BOOL dismissalStarted;
+
 @end
 
 @implementation RPVApplicationDetailController
@@ -98,6 +102,7 @@
 
         // Signing Notifications.
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_onSigningStatusUpdate:) name:@"jp.soh.reprovision/signingUpdate" object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_onSigningComplete:) name:@"jp.soh.reprovision/signingComplete" object:nil];
     }
 
     return self;
@@ -123,7 +128,7 @@
     self.view.backgroundColor = [UIColor clearColor];
 
     // Load up blur view, and content view as needed.
-    UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleLight];
+    UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial];
     self.backgroundView = [[UIVisualEffectView alloc] initWithEffect:blurEffect];
     self.backgroundView.contentView.userInteractionEnabled = YES;
 
@@ -140,7 +145,7 @@
     self.contentView = [[UIView alloc] initWithFrame:CGRectZero];
     self.contentView.clipsToBounds = YES;
     self.contentView.layer.cornerRadius = 12.5;
-    self.contentView.backgroundColor = [UIColor whiteColor];
+    self.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
     self.contentView.userInteractionEnabled = YES;
 
     [self.view addSubview:self.contentView];
@@ -192,7 +197,7 @@
 - (void)_addApplicationNameComponent {
     self.applicationNameLabel = [[MarqueeLabel alloc] initWithFrame:CGRectZero];
     self.applicationNameLabel.text = [self.application applicationName];
-    self.applicationNameLabel.textColor = [UIColor blackColor];
+    self.applicationNameLabel.textColor = [UIColor labelColor];
     self.applicationNameLabel.font = [UIFont systemFontOfSize:18.6 weight:UIFontWeightBold];
 
     // MarqueeLabel specific
@@ -211,7 +216,7 @@
 - (void)_addApplicationBundleIdentifierComponent {
     self.applicationBundleIdentifierLabel = [[MarqueeLabel alloc] initWithFrame:CGRectZero];
     self.applicationBundleIdentifierLabel.text = [self.application bundleIdentifier];
-    self.applicationBundleIdentifierLabel.textColor = [UIColor grayColor];
+    self.applicationBundleIdentifierLabel.textColor = [UIColor secondaryLabelColor];
     self.applicationBundleIdentifierLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
 
     // MarqueeLabel specific
@@ -224,7 +229,7 @@
 - (void)_addApplicationVersionComponent {
     self.versionTitle = [[UILabel alloc] initWithFrame:CGRectZero];
     self.versionTitle.text = @"Version";
-    self.versionTitle.textColor = [UIColor grayColor];
+    self.versionTitle.textColor = [UIColor secondaryLabelColor];
     self.versionTitle.textAlignment = NSTextAlignmentCenter;
     self.versionTitle.font = [UIFont systemFontOfSize:14];
 
@@ -232,7 +237,7 @@
 
     self.applicationVersionLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.applicationVersionLabel.text = [self.application applicationVersion];
-    self.applicationVersionLabel.textColor = [UIColor blackColor];
+    self.applicationVersionLabel.textColor = [UIColor labelColor];
     self.applicationVersionLabel.textAlignment = NSTextAlignmentCenter;
     self.applicationVersionLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
 
@@ -242,7 +247,7 @@
 - (void)_addApplicationInstalledSizeComponent {
     self.installedSizeTitle = [[UILabel alloc] initWithFrame:CGRectZero];
     self.installedSizeTitle.text = @"Size";
-    self.installedSizeTitle.textColor = [UIColor grayColor];
+    self.installedSizeTitle.textColor = [UIColor secondaryLabelColor];
     self.installedSizeTitle.textAlignment = NSTextAlignmentCenter;
     self.installedSizeTitle.font = [UIFont systemFontOfSize:14];
 
@@ -250,7 +255,7 @@
 
     self.applicationInstalledSizeLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.applicationInstalledSizeLabel.text = [NSString stringWithFormat:@"%.2f MB", [self.application applicationInstalledSize].floatValue / 1024.0 / 1024.0];
-    self.applicationInstalledSizeLabel.textColor = [UIColor blackColor];
+    self.applicationInstalledSizeLabel.textColor = [UIColor labelColor];
     self.applicationInstalledSizeLabel.textAlignment = NSTextAlignmentCenter;
     self.applicationInstalledSizeLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
 
@@ -264,7 +269,7 @@
     self.signingButton.titleLabel.font = [UIFont boldSystemFontOfSize:14];
 
     self.signingButton.layer.cornerRadius = 14.0;
-    self.signingButton.backgroundColor = [UIColor whiteColor];
+    self.signingButton.backgroundColor = [UIColor clearColor];
 
     // Add gradient
     CAGradientLayer *gradient = [CAGradientLayer layer];
@@ -291,7 +296,7 @@
 - (void)_addCalendarComponent {
     self.calendarTitle = [[UILabel alloc] initWithFrame:CGRectZero];
     self.calendarTitle.text = @"Expires";
-    self.calendarTitle.textColor = [UIColor grayColor];
+    self.calendarTitle.textColor = [UIColor secondaryLabelColor];
     self.calendarTitle.textAlignment = NSTextAlignmentCenter;
     self.calendarTitle.font = [UIFont systemFontOfSize:14];
 
@@ -308,7 +313,9 @@
     self.closeButton.clipsToBounds = YES;
 
     // Button image (cross)
-    [self.closeButton setImage:[UIImage imageNamed:@"buttonClose"] forState:UIControlStateNormal];
+    UIImage *closeImage = [[UIImage imageNamed:@"buttonClose"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    [self.closeButton setImage:closeImage forState:UIControlStateNormal];
+    self.closeButton.tintColor = [UIColor labelColor];
 
     [self.closeButton addTarget:self action:@selector(_userDidTapCloseButton:) forControlEvents:UIControlEventTouchUpInside];
 
@@ -323,7 +330,7 @@
     self.percentCompleteLabel.text = @"0% complete";
     self.percentCompleteLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
     self.percentCompleteLabel.hidden = YES;
-    self.percentCompleteLabel.textColor = [UIColor grayColor];
+    self.percentCompleteLabel.textColor = [UIColor secondaryLabelColor];
 
     // MarqueeLabel specific
     self.percentCompleteLabel.fadeLength = 8.0;
@@ -340,9 +347,9 @@
     self.progressBar.progressCapType = kCGLineCapRound;
     self.progressBar.emptyCapType = kCGLineCapRound;
     self.progressBar.progressLineWidth = 1.5;
-    self.progressBar.progressColor = [UIColor darkGrayColor];
-    self.progressBar.progressStrokeColor = [UIColor darkGrayColor];
-    self.progressBar.emptyLineColor = [UIColor lightGrayColor];
+    self.progressBar.progressColor = self.view.tintColor;
+    self.progressBar.progressStrokeColor = self.view.tintColor;
+    self.progressBar.emptyLineColor = [UIColor separatorColor];
     self.progressBar.backgroundColor = [UIColor clearColor];
 
     self.progressBar.hidden = YES;
@@ -451,11 +458,9 @@
             self.contentView.frame = CGRectMake(self.contentView.frame.origin.x, self.view.frame.size.height, self.contentView.frame.size.width, self.contentView.frame.size.height);
         }
         completion:^(BOOL finished) {
-            if (finished) {
-                self.contentView.transform = CGAffineTransformMakeScale(1.0, 1.0);
-
-                completionHandler();
-            }
+            // Remove the overlay even if UIKit interrupts the animation.
+            self.contentView.transform = CGAffineTransformMakeScale(1.0, 1.0);
+            completionHandler();
         }];
 }
 
@@ -464,6 +469,9 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 - (void)_userDidTapCloseButton:(id)button {
+    if (self.dismissalStarted) return;
+    self.dismissalStarted = YES;
+
     // animate out, and hide.
     [self animateForDismissalWithCompletion:^{
         [self removeFromParentViewController];
@@ -674,6 +682,9 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 - (void)_initiateSigningForCurrentApplication {
+    self.signingCompletionHandled = NO;
+    self.dismissalStarted = NO;
+
     // Start signing this one app.
     [[RPVApplicationSigning sharedInstance] resignSpecificApplications:@[self.application]
                                                             withTeamID:[RPVResources getTeamID]
@@ -690,9 +701,20 @@
     }
 }
 
+- (void)_onSigningComplete:(NSNotification *)notification {
+    // Asynchronous installs close the overlay when the pipeline finishes.
+    [self _signingProgressDidUpdate:100];
+}
+
 - (void)_signingProgressDidUpdate:(int)percent {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (percent > 0) {
+        int normalizedPercent = MIN(percent, 100);
+        if (normalizedPercent >= 100) {
+            if (self.signingCompletionHandled) return;
+            self.signingCompletionHandled = YES;
+        }
+
+        if (normalizedPercent > 0) {
             self.percentCompleteLabel.hidden = NO;
             self.progressBar.hidden = NO;
 
@@ -709,13 +731,13 @@
         }
 
         // Update progess bar!
-        [UIView animateWithDuration:percent == 0 ? 0.0 : 0.35
+        [UIView animateWithDuration:normalizedPercent == 0 ? 0.0 : 0.35
             delay:0.0
             options:UIViewAnimationOptionBeginFromCurrentState animations:^{
-                self.progressBar.value = percent;
-                self.percentCompleteLabel.text = [NSString stringWithFormat:@"%d%% complete", percent];
+                self.progressBar.value = normalizedPercent;
+                self.percentCompleteLabel.text = [NSString stringWithFormat:@"%d%% complete", normalizedPercent];
             } completion:^(BOOL finished) {
-                if (finished && percent == 100) {
+                if (normalizedPercent == 100) {
                     self.percentCompleteLabel.hidden = YES;
                     self.progressBar.hidden = YES;
 

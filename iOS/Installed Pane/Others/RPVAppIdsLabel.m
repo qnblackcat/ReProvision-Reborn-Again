@@ -27,7 +27,7 @@
 }
 
 - (void)setupLabel {
-    self.textColor = [UIColor blackColor];
+    self.textColor = [UIColor secondaryLabelColor];
     self.font = [UIFont systemFontOfSize:IS_IPAD ? 20 : 16 weight:UIFontWeightRegular];
     self.textAlignment = NSTextAlignmentCenter;
     self.alertController = [[RPVAppIDViewController alloc] init];

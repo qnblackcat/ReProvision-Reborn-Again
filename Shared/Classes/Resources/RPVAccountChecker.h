@@ -16,6 +16,8 @@
 
 - (void)requestLoginCodeWithCompletionHandler:(void (^)(NSError *error))completion;
 
+- (BOOL)hasActiveTwoFactorSession;
+
 - (void)request2FAFallbackWithCompletionHandler:(void (^)(NSString*, NSString*, NSArray*, NSURLCredential*))completionHandler;
 
 - (void)validateLoginCode:(NSString*)code withCompletionHandler:(void (^)(NSString*, NSString*, NSArray*, NSURLCredential*))completionHandler;

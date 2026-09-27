@@ -26,10 +26,21 @@
 - (void)requestLoginCodeWithCompletion:(void(^)(NSError*))completionHandler;
 
 /**
+ Returns whether the current one-time 2FA context can still request or submit
+ a verification code.
+ */
+- (BOOL)hasActiveTwoFactorSession;
+
+/**
  Requests a login code via direct AuthKit calls
  */
 - (void)fallback2FACodeRequest:(void(^)(NSError *error, NSString *userIdentity, NSString *gsToken))completionHandler;
 
 - (NSDictionary*)appleIDHeadersForRequest:(NSURLRequest*)request;
+
+/**
+ Fetches a fresh OTP for the persistent macOS ADI identity used on iOS 17+.
+ */
+- (void)prepareAnisetteWithCompletion:(void(^)(NSError *error))completion;
 
 @end

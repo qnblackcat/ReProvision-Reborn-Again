@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>application-identifier</key>
+	<string>TESTTEAM01.com.b4db1r3.reprovision-signature-fixture</string>
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:first-signature-fixture.example.invalid</string>
+		<string>applinks:second-signature-fixture.example.invalid</string>
+		<string>webcredentials:third-signature-fixture.example.invalid</string>
+		<string>activitycontinuation:fourth-signature-fixture.example.invalid</string>
+	</array>
+	<key>com.apple.developer.team-identifier</key>
+	<string>TESTTEAM01</string>
+	<key>fixture-dictionary</key>
+	<dict>
+		<key>enabled</key>
+		<true/>
+		<key>version</key>
+		<integer>18</integer>
+	</dict>
+	<key>get-task-allow</key>
+	<true/>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>TESTTEAM01.com.b4db1r3.reprovision-signature-fixture</string>
+		<string>TESTTEAM01.com.b4db1r3.reprovision-signature-fixture.shared</string>
+	</array>
+</dict>
+</plist>

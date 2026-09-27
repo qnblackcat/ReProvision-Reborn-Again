@@ -31,7 +31,7 @@
 - (void)_loadSubviews {
     self.weekdaySymbolLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, CELL_WIDTH, 25)];
     self.weekdaySymbolLabel.text = @"X";
-    self.weekdaySymbolLabel.textColor = [UIColor grayColor];
+    self.weekdaySymbolLabel.textColor = [UIColor secondaryLabelColor];
     self.weekdaySymbolLabel.textAlignment = NSTextAlignmentCenter;
     self.weekdaySymbolLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightLight];
     
@@ -39,7 +39,7 @@
     
     self.dayNumberLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 25, CELL_WIDTH, CELL_WIDTH)];
     self.dayNumberLabel.text = @"00";
-    self.dayNumberLabel.textColor = [UIColor blackColor];
+    self.dayNumberLabel.textColor = [UIColor labelColor];
     self.dayNumberLabel.textAlignment = NSTextAlignmentCenter;
     self.dayNumberLabel.font = [UIFont systemFontOfSize:20];
     
@@ -56,7 +56,7 @@
 
 - (void)setSelected:(BOOL)selected {
     self.selectedDotView.hidden = !selected;
-    self.dayNumberLabel.textColor = selected ? [UIColor whiteColor] : [UIColor blackColor];
+    self.dayNumberLabel.textColor = selected ? [UIColor whiteColor] : [UIColor labelColor];
 }
 
 - (void)setDate:(NSDate*)date {

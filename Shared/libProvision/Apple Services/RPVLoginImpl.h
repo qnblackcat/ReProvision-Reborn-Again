@@ -13,6 +13,8 @@
 #define RPVInternalLogin2FARequiredTrustedDeviceError 4010
 #define RPVInternalLogin2FARequiredSecondaryAuthError 4011
 #define RPVInternalLoginIncorrect2FACodeError 4012
+#define RPVInternalLoginInvalid2FAFormatError 4013
+#define RPVInternalLoginPostTwoFactorError 4014
 
 // Block definitions
 typedef void (^RPVLoginResultBlock)(NSError *error, NSString *userIdentity, NSString *gsToken, NSString *idmsToken);
@@ -21,11 +23,16 @@ typedef void (^RPVTwoFactorResultBlock)(NSError *error);
 @interface RPVLoginImpl : NSObject
 
 @property (nonatomic, strong) NSString *clientInfoOverride;
+@property (nonatomic, strong) NSDictionary *anisetteDataOverride;
 
 - (void)loginWithUsername:(NSString*)username password:(NSString*)password completion:(RPVLoginResultBlock)completionHandler;
 
 - (void)requestTwoFactorCodeWithUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token mode:(int)mode andCompletion:(void (^)(NSError *error))completionHandler;
 
-- (void)submitTwoFactorCode:(NSString*)code withUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token andCompletion:(RPVTwoFactorResultBlock)completionHandler;
+- (void)submitTwoFactorCode:(NSString*)code
+           withUserIdentity:(NSString*)userIdentity
+                  idmsToken:(NSString*)token
+                       mode:(int)mode
+              andCompletion:(RPVTwoFactorResultBlock)completionHandler;
 
 @end

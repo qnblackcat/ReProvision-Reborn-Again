@@ -1,0 +1,37 @@
+#!/bin/sh
+
+DAEMON_LABEL="jp.soh.reprovisiond"
+DAEMON_PLIST="/var/jb/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
+APP_PATH="/var/jb/Applications/ReProvision.app"
+INBOX_PATH="/var/mobile/Library/Application Support/Containers/jp.soh.reprovision.ios/Documents/Inbox"
+
+if [ -d "$INBOX_PATH" ]; then
+	rm -rf -- "$INBOX_PATH"
+fi
+
+chown root:wheel "$DAEMON_PLIST" 2>/dev/null || true
+chmod 0644 "$DAEMON_PLIST" 2>/dev/null || true
+
+LAUNCHCTL=""
+for candidate in /var/jb/bin/launchctl /var/jb/usr/bin/launchctl /bin/launchctl; do
+	if [ -x "$candidate" ]; then
+		LAUNCHCTL="$candidate"
+		break
+	fi
+done
+
+if [ -n "$LAUNCHCTL" ]; then
+	"$LAUNCHCTL" bootout "system/${DAEMON_LABEL}" 2>/dev/null || \
+		"$LAUNCHCTL" unload "$DAEMON_PLIST" 2>/dev/null || true
+	"$LAUNCHCTL" bootstrap system "$DAEMON_PLIST" 2>/dev/null || \
+		"$LAUNCHCTL" load "$DAEMON_PLIST" 2>/dev/null || true
+	"$LAUNCHCTL" kickstart -k "system/${DAEMON_LABEL}" 2>/dev/null || true
+fi
+
+if [ -x /var/jb/usr/bin/uicache ]; then
+	/var/jb/usr/bin/uicache -p "$APP_PATH" 2>/dev/null || true
+elif command -v uicache >/dev/null 2>&1; then
+	uicache -p "$APP_PATH" 2>/dev/null || true
+fi
+
+exit 0

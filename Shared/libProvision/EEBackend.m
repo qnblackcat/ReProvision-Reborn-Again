@@ -147,38 +147,23 @@
     NSString *embeddedPath = [NSString stringWithFormat:@"%@/embedded.mobileprovision", path];
     BOOL isEmbeddedExists = [[NSFileManager defaultManager] fileExistsAtPath:embeddedPath];
 
-    if (isEmbeddedExists) {
-        BOOL isInstalledFromXcode = NO;
-        BOOL isInstalledWithAnotherID = NO;
-
-        NSString *profileString = [NSString stringWithContentsOfFile:embeddedPath encoding:NSISOLatin1StringEncoding error:nil];
-        NSRange rangeOfTeamId = [profileString rangeOfString:teamId ?: @""];
-        NSRange rangeOfXC = [profileString rangeOfString:@"XC "];
-        if (rangeOfTeamId.location != NSNotFound && rangeOfXC.location != NSNotFound)
-            isInstalledFromXcode = YES;
-        else if (![applicationId hasSuffix:teamId]) {
-            // application is installed with another apple id
-            isInstalledWithAnotherID = YES;
-        }
-
-        if (isInstalledFromXcode || isInstalledWithAnotherID) {
-            // This process should be done elsewhere and will be changed later
-            // but i don't have enough time to understand the structure of this project.
-            NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
-            [userInfo setObject:applicationId forKey:@"bundleIdentifier"];
-
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"jp.soh.reprovision/appShouldBeRemoved" object:nil userInfo:userInfo];
-        }
-    }
-
     if ([infoplist objectForKey:@"ALTBundleIdentifier"] != nil)
         applicationId = [infoplist objectForKey:@"ALTBundleIdentifier"];
     else if ([infoplist objectForKey:@"REBundleIdentifier"] != nil)
         applicationId = [infoplist objectForKey:@"REBundleIdentifier"];
-    else
-        [infoplist setObject:applicationId forKey:@"REBundleIdentifier"];
 
-    applicationId = [applicationId stringByAppendingFormat:@".%@", teamId];
+    // Recover the original bundle ID before applying the Personal Team suffix.
+    NSString *teamSuffix = teamId.length > 0 ? [NSString stringWithFormat:@".%@", teamId] : @"";
+    while (teamSuffix.length > 1 &&
+           [applicationId hasSuffix:teamSuffix] &&
+           applicationId.length > teamSuffix.length) {
+        applicationId = [applicationId substringToIndex:applicationId.length - teamSuffix.length];
+    }
+
+    [infoplist setObject:applicationId forKey:@"REBundleIdentifier"];
+    if (teamSuffix.length > 1) {
+        applicationId = [applicationId stringByAppendingString:teamSuffix];
+    }
     [infoplist setObject:applicationId forKey:@"CFBundleIdentifier"];
 
     NSError *error = nil;
@@ -268,49 +253,55 @@
         return;
     }
 
-    // 2. Sign its main bundle via above method.
-    // The bundle will be located at <temporarydirectory>/<zipfilename>/Payload/*.app internally
-
-    NSString *zipFilename = [ipaPath lastPathComponent];
-    zipFilename = [zipFilename stringByReplacingOccurrencesOfString:@".ipa" withString:@""];
-
+    // 2. Sign the top-level app; nested targets are handled recursively.
     NSString *payloadDirectory = [NSString stringWithFormat:@"%@/Payload", unpackedDirectory];
 
     NSArray *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:payloadDirectory error:&error];
 
     if (error) {
+        [[NSFileManager defaultManager] removeItemAtPath:unpackedDirectory error:nil];
         completionHandler(error);
-        return;
-    } else if (files.count == 0) {
-        NSError *err = [self _errorFromString:@"Payload directory of IPA has no contents"];
-        completionHandler(err);
         return;
     }
 
-    NSString *dotAppDirectory = @"";
-    for (NSString *directory in files) {
-        if ([directory containsString:@".app"]) {
-            dotAppDirectory = directory;
-            break;
+    NSMutableArray *topLevelApplications = [NSMutableArray array];
+    for (NSString *entry in files) {
+        NSString *candidatePath = [payloadDirectory stringByAppendingPathComponent:entry];
+        BOOL isDirectory = NO;
+        if ([[entry pathExtension] caseInsensitiveCompare:@"app"] == NSOrderedSame &&
+            [[NSFileManager defaultManager] fileExistsAtPath:candidatePath isDirectory:&isDirectory] && isDirectory) {
+            [topLevelApplications addObject:entry];
         }
     }
 
-    NSString *bundleDirectory = [NSString stringWithFormat:@"%@/%@", payloadDirectory, dotAppDirectory];
+    if (topLevelApplications.count != 1) {
+        NSString *description = topLevelApplications.count == 0
+            ? @"The IPA Payload does not contain a top-level .app bundle."
+            : [NSString stringWithFormat:@"The IPA Payload contains multiple top-level .app bundles (%@).",
+               [topLevelApplications componentsJoinedByString:@", "]];
+        [[NSFileManager defaultManager] removeItemAtPath:unpackedDirectory error:nil];
+        completionHandler([self _errorFromString:description]);
+        return;
+    }
+
+    NSString *bundleDirectory = [payloadDirectory stringByAppendingPathComponent:[topLevelApplications firstObject]];
 
     NSLog(@"Signing bundle at path '%@'", bundleDirectory);
 
     [self signBundleAtPath:bundleDirectory identity:identity gsToken:gsToken priorChosenTeamID:teamId withCompletionHandler:^(NSError *err) {
         if (err) {
+            [[NSFileManager defaultManager] removeItemAtPath:unpackedDirectory error:nil];
             completionHandler(err);
             return;
         }
 
         // 3. Repack IPA to output path
-        NSError *error2;
-        if (![self repackIpaAtPath:[NSString stringWithFormat:@"%@/%@", [self applicationTemporaryDirectory], zipFilename] toPath:outputPath error:&error2]) {
+        NSError *error2 = nil;
+        if (![self repackIpaAtPath:unpackedDirectory toPath:outputPath error:&error2]) {
+            [[NSFileManager defaultManager] removeItemAtPath:unpackedDirectory error:nil];
             completionHandler(error2);
         } else {
-            // Success!
+            [[NSFileManager defaultManager] removeItemAtPath:unpackedDirectory error:nil];
             completionHandler(nil);
         }
     }];
@@ -330,16 +321,30 @@
         return NO;
     }
 
-    NSString *zipFilename = [ipaPath lastPathComponent];
-    zipFilename = [zipFilename stringByReplacingOccurrencesOfString:@".ipa" withString:@""];
-
-    *outputDirectory = [NSString stringWithFormat:@"%@/%@", [self applicationTemporaryDirectory], zipFilename];
+    *outputDirectory = [[self applicationTemporaryDirectory] stringByAppendingPathComponent:
+                        [NSString stringWithFormat:@"reprovision-unpack-%@", [[NSUUID UUID] UUIDString]]];
 
     NSLog(@"Unpacking '%@' into directory '%@'", ipaPath, *outputDirectory);
 
-    if (![SSZipArchive unzipFileAtPath:ipaPath toDestination:*outputDirectory]) {
+    NSError *directoryError = nil;
+    if (![[NSFileManager defaultManager] createDirectoryAtPath:*outputDirectory
+                                   withIntermediateDirectories:YES
+                                                    attributes:nil
+                                                         error:&directoryError]) {
         if (error)
-            *error = [self _errorFromString:@"Failed to unpack IPA!"];
+            *error = directoryError ?: [self _errorFromString:@"Failed to create a clean IPA extraction directory!"];
+        return NO;
+    }
+
+    NSError *unzipError = nil;
+    if (![SSZipArchive unzipFileAtPath:ipaPath
+                        toDestination:*outputDirectory
+                            overwrite:YES
+                             password:nil
+                                error:&unzipError]) {
+        [[NSFileManager defaultManager] removeItemAtPath:*outputDirectory error:nil];
+        if (error)
+            *error = unzipError ?: [self _errorFromString:@"Failed to unpack IPA!"];
         return NO;
     }
 

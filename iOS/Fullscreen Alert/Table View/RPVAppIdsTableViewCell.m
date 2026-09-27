@@ -99,13 +99,13 @@ static CGFloat inset = 20;
     }
 
     // Reset text colours if needed
-    self.displayNameLabel.textColor = [UIColor blackColor];
+    self.displayNameLabel.textColor = [UIColor labelColor];
     self.displayNameLabel.font = [UIFont systemFontOfSize:IS_IPAD ? 20 : 16 weight:UIFontWeightBold];
     self.displayNameLabel.textAlignment = NSTextAlignmentLeft;
     self.displayNameLabel.labelize = NO;
 
-    self.identifierLabel.textColor = [UIColor grayColor];
-    self.timeRemainingLabel.textColor = [UIColor grayColor];
+    self.identifierLabel.textColor = [UIColor secondaryLabelColor];
+    self.timeRemainingLabel.textColor = [UIColor secondaryLabelColor];
 
     // Reset hidden states if needed
     self.identifierLabel.hidden = NO;
@@ -115,7 +115,7 @@ static CGFloat inset = 20;
     self.contentView.layer.cornerRadius = 12.5;
 
     self.backgroundColor = [UIColor clearColor];
-    self.contentView.backgroundColor = [UIColor whiteColor];
+    self.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
 }
 
 - (void)configureWithAppID:(RPVAppID*)appID fallbackDisplayName:(NSString*)fallback andExpiryDate:(NSDate*)date {
@@ -126,7 +126,7 @@ static CGFloat inset = 20;
         self.identifier = @"";
 
         // No application to display
-        self.displayNameLabel.textColor = [UIColor darkGrayColor];
+        self.displayNameLabel.textColor = [UIColor secondaryLabelColor];
         self.displayNameLabel.font = [UIFont systemFontOfSize:IS_IPAD ? 20 : 16 weight:UIFontWeightRegular];
         self.displayNameLabel.textAlignment = NSTextAlignmentCenter;
         self.displayNameLabel.labelize = YES;

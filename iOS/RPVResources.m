@@ -97,7 +97,7 @@ static dispatch_once_t nanoRegistryOnceToken;
 
     // Write to CFPreferences
     CFPreferencesSetValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, CFSTR("jp.soh.reprovision.ios"), kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
-    CFPreferencesAppSynchronize(CFSTR("jp.soh.reprovision.ios"));
+    CFPreferencesSynchronize(CFSTR("jp.soh.reprovision.ios"), kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
 
     // Notify daemon of new preferences.
     [(AppDelegate *)[UIApplication sharedApplication].delegate requestPreferencesUpdate];
@@ -123,6 +123,11 @@ static dispatch_once_t nanoRegistryOnceToken;
 }
 
 + (NSString *)getPassword {
+#if TARGET_OS_SIMULATOR
+    NSString *simulatorPassword = [NSProcessInfo processInfo].environment[@"RPV_SIMULATOR_TEST_PASSWORD"];
+    if (simulatorPassword.length > 0)
+        return simulatorPassword;
+#endif
     return [SAMKeychain passwordForService:SERVICENAME account:[self getUsername]];
 }
 
@@ -142,6 +147,33 @@ static dispatch_once_t nanoRegistryOnceToken;
 
     [[NSUserDefaults standardUserDefaults] setObject:teamId forKey:@"cachedTeamID"];
     [[NSUserDefaults standardUserDefaults] setObject:CURRENT_CREDENTIALS_VERSION forKey:@"credentialsVersion"];
+}
+
++ (void)migrateStoredCredentialsForBackgroundAccessIfPossible {
+#if TARGET_OS_SIMULATOR
+    if ([NSProcessInfo processInfo].environment[@"RPV_SIMULATOR_TEST_PASSWORD"])
+        return;
+#endif
+    // Re-save legacy WhenUnlocked entries using the current accessibility policy.
+    if (![UIApplication sharedApplication].protectedDataAvailable)
+        return;
+
+    NSString *username = [self getUsername];
+    if (username.length == 0)
+        return;
+
+    NSError *readError = nil;
+    NSString *password = [SAMKeychain passwordForService:SERVICENAME account:username error:&readError];
+    if (password.length == 0) {
+        if (readError)
+            NSLog(@"*** [ReProvision] :: Credential migration deferred: %@", readError.localizedDescription);
+        return;
+    }
+
+    NSError *writeError = nil;
+    if (![SAMKeychain setPassword:password forService:SERVICENAME account:username error:&writeError]) {
+        NSLog(@"*** [ReProvision] :: Unable to migrate credentials for locked signing: %@", writeError.localizedDescription);
+    }
 }
 
 + (void)userDidRequestAccountSignIn {

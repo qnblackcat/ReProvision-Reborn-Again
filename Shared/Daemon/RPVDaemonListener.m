@@ -29,6 +29,7 @@ extern "C" {
 BOOL SBSProcessIDForDisplayIdentifier(CFStringRef identifier, pid_t *pid);
 
 // Needs the com.apple.backboardd.launchapplications entitlement
+int SBSLaunchApplicationWithIdentifier(CFStringRef identifier, BOOL suspended);
 int SBSLaunchApplicationWithIdentifierAndLaunchOptions(CFStringRef identifier, CFDictionaryRef launchOptions, BOOL suspended);
 CFStringRef SBSApplicationLaunchingErrorString(int error);
 
@@ -87,27 +88,48 @@ typedef enum : NSUInteger {
 @property (nonatomic, readwrite) BOOL springboardDidLaunchSeen;
 
 @property (nonatomic, strong) NSTimer *signingTimer;
+@property (nonatomic, strong) NSTimer *applicationLaunchRetryTimer;
+@property (nonatomic, readwrite) NSUInteger applicationLaunchRetryAttempt;
 
 @property (nonatomic, strong) BKSProcessAssertion *applicationBackgroundAssertion;
+@property (nonatomic, readwrite) pid_t applicationAssertionPID;
+@property (nonatomic, readwrite) NSUInteger applicationAssertionGeneration;
+@property (nonatomic, readwrite) IOPMAssertionID signingPowerAssertion;
+@property (nonatomic, copy) NSString *activeSigningIdentifier;
 @property (nonatomic, strong) NSXPCConnection *xpcConnection;
+@property (nonatomic, readwrite) NSUInteger xpcConnectionGeneration;
 @property (nonatomic, strong) NSMutableArray *pendingXpcConnectionQueue;
 
 @end
 
 @implementation RPVDaemonListener
 
+#if !TARGET_OS_SIMULATOR
+static const NSUInteger RPVMaximumBackgroundLaunchRetries = 5;
+static const NSTimeInterval RPVSigningAssertionFallbackInterval = 300.0;
+#endif
+
+- (void)_performOnMainThread:(dispatch_block_t)block {
+    if ([NSThread isMainThread]) {
+        block();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), block);
+    }
+}
+
 - (void)reloadSettings {
     // Reload settings.
     NSLog(@"*** [reprovisiond] :: Reloading settings");
 
-    CFPreferencesAppSynchronize(CFSTR(APPLICATION_IDENTIFIER));
+    CFPreferencesSynchronize(CFSTR(APPLICATION_IDENTIFIER), CFSTR("mobile"), kCFPreferencesCurrentHost);
 
-    CFArrayRef keyList = CFPreferencesCopyKeyList(CFSTR(APPLICATION_IDENTIFIER), CFSTR("mobile"), kCFPreferencesAnyHost);
+    // Read the same mobile/current-host preference domain written by the app.
+    CFArrayRef keyList = CFPreferencesCopyKeyList(CFSTR(APPLICATION_IDENTIFIER), CFSTR("mobile"), kCFPreferencesCurrentHost);
 
     if (!keyList) {
         self.settings = [NSMutableDictionary dictionary];
     } else {
-        CFDictionaryRef dictionary = CFPreferencesCopyMultiple(keyList, CFSTR(APPLICATION_IDENTIFIER), CFSTR("mobile"), kCFPreferencesAnyHost);
+        CFDictionaryRef dictionary = CFPreferencesCopyMultiple(keyList, CFSTR(APPLICATION_IDENTIFIER), CFSTR("mobile"), kCFPreferencesCurrentHost);
 
         self.settings = [(__bridge NSDictionary *)dictionary copy];
 
@@ -132,7 +154,7 @@ typedef enum : NSUInteger {
     self.settings = mutableSettings;
 
     // Sync
-    CFPreferencesAppSynchronize(CFSTR(APPLICATION_IDENTIFIER));
+    CFPreferencesSynchronize(CFSTR(APPLICATION_IDENTIFIER), CFSTR("mobile"), kCFPreferencesCurrentHost);
 }
 
 - (id)getPreferenceKey:(NSString *)key {
@@ -140,6 +162,14 @@ typedef enum : NSUInteger {
 }
 
 - (void)initialiseListener {
+    if (![NSThread isMainThread]) {
+        __weak RPVDaemonListener *weakSelf = self;
+        [self _performOnMainThread:^{
+            [weakSelf initialiseListener];
+        }];
+        return;
+    }
+
     // Setup notifications
     [self setupNotifyPosts];
 
@@ -156,6 +186,14 @@ typedef enum : NSUInteger {
 }
 
 - (void)_startSigningTimer {
+    if (![NSThread isMainThread]) {
+        __weak RPVDaemonListener *weakSelf = self;
+        [self _performOnMainThread:^{
+            [weakSelf _startSigningTimer];
+        }];
+        return;
+    }
+
     NSDate *nextFireDate = [self getPreferenceKey:@"nextFireDate"];
     NSTimeInterval nextFireInterval = [self heartbeatTimerInterval];
 
@@ -172,74 +210,81 @@ typedef enum : NSUInteger {
 
     NSLog(@"*** [reprovisiond] :: Starting signing timer, next fire in: %f minutes", (float)nextFireInterval / 60.0);
 
-    self.signingTimer = [NSTimer timerWithTimeInterval:nextFireInterval target:self selector:@selector(signingTimerDidFire:) userInfo:nil repeats:NO];
-
-    if ([self trueBgResign]) {
-        [self _cancelAllWakeTimer];
-        NSDate *wakeTime = [[NSDate date] dateByAddingTimeInterval:(nextFireInterval - 10)];
-        IOReturn ret = IOPMSchedulePowerEvent((__bridge CFDateRef)wakeTime, CFSTR("jp.soh.reprovisiond"), CFSTR(kIOPMAutoWakeOrPowerOn));
-        if (ret == kIOReturnSuccess)
-            NSLog(@"*** [reprovisiond] :: Successfully set wake timer");
-        else
-            NSLog(@"*** [reprovisiond] :: Error occured when set wake timer");
-
-        CFMutableDictionaryRef scheduleDict = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFDictionaryAddValue(scheduleDict, CFSTR(kIOPMPowerEventTimeKey), (__bridge CFDateRef)[wakeTime dateByAddingTimeInterval:5]);
-        CFDictionaryAddValue(scheduleDict, CFSTR(kIOPMPowerEventAppNameKey), CFSTR("jp.soh.reprovisiond"));
-        CFDictionaryAddValue(scheduleDict, CFSTR(kIOPMPowerEventUserVisible), kCFBooleanTrue);
-
-        ret = IOPMRequestSysWake(scheduleDict);
-        if (ret == kIOReturnSuccess)
-            NSLog(@"*** [reprovisiond] :: Success IOPMRequestSysWake (at %@)", wakeTime);
-        else
-            NSLog(@"*** [reprovisiond] :: occured when set sys wake %s", mach_error_string(ret));
-        CFRelease(scheduleDict);
-    }
-
-    [[NSRunLoop currentRunLoop] addTimer:self.signingTimer
-                                 forMode:NSDefaultRunLoopMode];
+    [self _replaceSigningTimerWithInterval:nextFireInterval];
 }
 
 - (void)_restartSigningTimerWithInterval:(NSTimeInterval)interval {
+    if (![NSThread isMainThread]) {
+        __weak RPVDaemonListener *weakSelf = self;
+        [self _performOnMainThread:^{
+            [weakSelf _restartSigningTimerWithInterval:interval];
+        }];
+        return;
+    }
+
     NSLog(@"*** [reprovisiond] :: Restarting signing timer, next fire in: %f minutes", (float)interval / 60.0);
+
+    [self _replaceSigningTimerWithInterval:interval];
+}
+
+- (void)_replaceSigningTimerWithInterval:(NSTimeInterval)interval {
+    NSAssert([NSThread isMainThread], @"Signing timers must be managed on the daemon main thread");
+
+    interval = MAX(interval, 1.0);
 
     if (self.signingTimer)
         [self.signingTimer invalidate];
 
     self.signingTimer = [NSTimer timerWithTimeInterval:interval target:self selector:@selector(signingTimerDidFire:) userInfo:nil repeats:NO];
+    [[NSRunLoop mainRunLoop] addTimer:self.signingTimer forMode:NSRunLoopCommonModes];
 
-    NSDate *nextFireDate = (NSDate *)[self getPreferenceKey:@"nextFireDate"];
-    if (([nextFireDate timeIntervalSinceDate:self.signingTimer.fireDate] < -10 || [nextFireDate timeIntervalSinceDate:self.signingTimer.fireDate] > 10) && [self trueBgResign]) {
-        [self _cancelAllWakeTimer];
+    // Keep the run-loop timer and hardware wake on the same persisted date.
+    NSDate *nextFireDate = self.signingTimer.fireDate;
+    [self setPreferenceKey:@"nextFireDate" withValue:nextFireDate];
+    [self _scheduleWakeForSigningDate:nextFireDate];
+}
 
-        NSDate *wakeTime = [[NSDate date] dateByAddingTimeInterval:(interval - 10)];
-        IOReturn ret = IOPMSchedulePowerEvent((__bridge CFDateRef)wakeTime, CFSTR("jp.soh.reprovisiond"), CFSTR(kIOPMAutoWakeOrPowerOn));
-        if (ret == kIOReturnSuccess)
-            NSLog(@"*** [reprovisiond] :: Successfully set wake timer");
-        else
-            NSLog(@"*** [reprovisiond] :: Error occured when set wake timer");
+- (void)_scheduleWakeForSigningDate:(NSDate *)signingDate {
+    NSAssert([NSThread isMainThread], @"Wake events must be managed on the daemon main thread");
 
-        CFMutableDictionaryRef scheduleDict = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFDictionaryAddValue(scheduleDict, CFSTR(kIOPMPowerEventTimeKey), (__bridge CFDateRef)[wakeTime dateByAddingTimeInterval:5]);
-        CFDictionaryAddValue(scheduleDict, CFSTR(kIOPMPowerEventAppNameKey), CFSTR("jp.soh.reprovisiond"));
-        CFDictionaryAddValue(scheduleDict, CFSTR(kIOPMPowerEventUserVisible), kCFBooleanTrue);
+#if TARGET_OS_SIMULATOR
+    return;
+#else
+    [self _cancelAllWakeTimer];
 
-        ret = IOPMRequestSysWake(scheduleDict);
-        if (ret == kIOReturnSuccess)
-            NSLog(@"*** [reprovisiond] :: Success IOPMRequestSysWake (at %@)", wakeTime);
-        else
-            NSLog(@"*** [reprovisiond] :: occured when set sys wake %s", mach_error_string(ret));
-        CFRelease(scheduleDict);
-    }
+    if (![self shouldAutomaticallyResign] || ![self trueBgResign] || !signingDate)
+        return;
 
-    [[NSRunLoop currentRunLoop] addTimer:self.signingTimer
-                                 forMode:NSDefaultRunLoopMode];
+    // Schedule the hardware wake shortly before the software timer.
+    NSDate *wakeTime = [signingDate dateByAddingTimeInterval:-10.0];
+    NSDate *minimumWakeTime = [NSDate dateWithTimeIntervalSinceNow:1.0];
+    if ([wakeTime compare:minimumWakeTime] == NSOrderedAscending)
+        wakeTime = minimumWakeTime;
 
-    // Persist next fire date in the event of crash or shutdown
-    [self setPreferenceKey:@"nextFireDate" withValue:[[NSDate date] dateByAddingTimeInterval:interval]];
+    IOReturn ret = IOPMSchedulePowerEvent((__bridge CFDateRef)wakeTime, CFSTR("jp.soh.reprovisiond"), CFSTR(kIOPMAutoWakeOrPowerOn));
+    if (ret == kIOReturnSuccess)
+        NSLog(@"*** [reprovisiond] :: Successfully scheduled background wake for %@", wakeTime);
+    else
+        NSLog(@"*** [reprovisiond] :: Failed to schedule background wake: %s", mach_error_string(ret));
+
+    CFMutableDictionaryRef scheduleDict = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionaryAddValue(scheduleDict, CFSTR(kIOPMPowerEventTimeKey), (__bridge CFDateRef)[wakeTime dateByAddingTimeInterval:5]);
+    CFDictionaryAddValue(scheduleDict, CFSTR(kIOPMPowerEventAppNameKey), CFSTR("jp.soh.reprovisiond"));
+    CFDictionaryAddValue(scheduleDict, CFSTR(kIOPMPowerEventUserVisible), kCFBooleanTrue);
+
+    ret = IOPMRequestSysWake(scheduleDict);
+    if (ret == kIOReturnSuccess)
+        NSLog(@"*** [reprovisiond] :: Successfully requested system wake for %@", wakeTime);
+    else
+        NSLog(@"*** [reprovisiond] :: Failed to request system wake: %s", mach_error_string(ret));
+    CFRelease(scheduleDict);
+#endif
 }
 
 - (void)_cancelAllWakeTimer {
+#if TARGET_OS_SIMULATOR
+    return;
+#else
     CFArrayRef events = IOPMCopyScheduledPowerEvents();
     if (events) {
         int i;
@@ -247,7 +292,7 @@ typedef enum : NSUInteger {
         for (i = 0; i < count; i++) {
             CFDictionaryRef dict = (CFDictionaryRef)CFArrayGetValueAtIndex(events, i);
             CFStringRef id = (CFStringRef)CFDictionaryGetValue(dict, CFSTR(kIOPMPowerEventAppNameKey));
-            if (CFEqual(id, CFSTR("jp.soh.reprovisiond"))) {
+            if (id && CFEqual(id, CFSTR("jp.soh.reprovisiond"))) {
                 CFDateRef EventTime = (CFDateRef)CFDictionaryGetValue(dict, CFSTR(kIOPMPowerEventTimeKey));
                 CFStringRef EventType = (CFStringRef)CFDictionaryGetValue(dict, CFSTR(kIOPMPowerEventTypeKey));
                 IOReturn ret = IOPMCancelScheduledPowerEvent(EventTime, id, EventType);
@@ -259,6 +304,7 @@ typedef enum : NSUInteger {
         }
         CFRelease(events);
     }
+#endif
 }
 
 - (NSTimeInterval)heartbeatTimerInterval {
@@ -278,7 +324,8 @@ typedef enum : NSUInteger {
 
 - (BOOL)trueBgResign {
     id value = [self.settings objectForKey:@"trueBgResign"];
-    return value ? [value boolValue] : NO;
+    // Enable scheduled wakes by default unless the user disables them.
+    return value ? [value boolValue] : YES;
 }
 
 - (BOOL)shouldAutomaticallyResign {
@@ -287,15 +334,27 @@ typedef enum : NSUInteger {
 }
 
 - (void)signingTimerDidFire:(id)sender {
+    if (![NSThread isMainThread]) {
+        __weak RPVDaemonListener *weakSelf = self;
+        [self _performOnMainThread:^{
+            [weakSelf signingTimerDidFire:sender];
+        }];
+        return;
+    }
+
     // Do checks for Low Power Mode stuff.
     BOOL isInLPM = [[NSProcessInfo processInfo] isLowPowerModeEnabled];
     if (isInLPM && ![self canSignInLowPowerMode]) {
         NSLog(@"*** [reprovisiond] :: Signing skipped: in Low Power Mode, and user set to not sign.");
+        [self _restartSigningTimerWithInterval:[self heartbeatTimerInterval]];
         return;
     }
 
     if (![self shouldAutomaticallyResign]) {
         NSLog(@"*** [reprovisiond] :: Signing skipped: user disabled automatic re-signing.");
+        [self.signingTimer invalidate];
+        self.signingTimer = nil;
+        [self _cancelAllWakeTimer];
         return;
     }
 
@@ -307,6 +366,14 @@ typedef enum : NSUInteger {
 }
 
 - (void)_initiateNewSigningRoutine {
+    if (![NSThread isMainThread]) {
+        __weak RPVDaemonListener *weakSelf = self;
+        [self _performOnMainThread:^{
+            [weakSelf _initiateNewSigningRoutine];
+        }];
+        return;
+    }
+
     // Launch our companion app backgrounded, and update the notification flag for it to
     // then initiate signing.
     NSLog(@"*** [reprovisiond] :: Starting new background signing routine.");
@@ -326,6 +393,14 @@ typedef enum : NSUInteger {
 }
 
 - (void)_launchApplicationBackgroundedWithNotification:(RPVApplicationNotification)notification {
+    if (![NSThread isMainThread]) {
+        __weak RPVDaemonListener *weakSelf = self;
+        [self _performOnMainThread:^{
+            [weakSelf _launchApplicationBackgroundedWithNotification:notification];
+        }];
+        return;
+    }
+
     // Launch the application
     int result = [self _launchApplicationBackgroundedAndAquireAssertion];
     if (result) {
@@ -339,6 +414,7 @@ typedef enum : NSUInteger {
     // Queue notifications when not connected
     if (!self.xpcConnection) {
         [self remoteObjectProxyErrorHandler:notification];
+        [self _scheduleApplicationLaunchRetry];
         return;
     }
 
@@ -366,12 +442,65 @@ typedef enum : NSUInteger {
 }
 
 - (void)remoteObjectProxyErrorHandler:(RPVApplicationNotification)notification {
+    if (![NSThread isMainThread]) {
+        __weak RPVDaemonListener *weakSelf = self;
+        [self _performOnMainThread:^{
+            [weakSelf remoteObjectProxyErrorHandler:notification];
+        }];
+        return;
+    }
+
     NSLog(@"*** reprovisiond :: Queuing notification %lu until connection is established", (unsigned long)notification);
     // Drop the message onto a queue, and go from there
     if (!self.pendingXpcConnectionQueue)
         self.pendingXpcConnectionQueue = [NSMutableArray array];
 
-    [self.pendingXpcConnectionQueue addObject:[NSNumber numberWithInt:notification]];
+    NSNumber *queuedNotification = [NSNumber numberWithUnsignedInteger:notification];
+    if (![self.pendingXpcConnectionQueue containsObject:queuedNotification])
+        [self.pendingXpcConnectionQueue addObject:queuedNotification];
+
+    [self _scheduleApplicationLaunchRetry];
+}
+
+- (void)_scheduleApplicationLaunchRetry {
+    NSAssert([NSThread isMainThread], @"Application launch retries must run on the daemon main thread");
+
+#if TARGET_OS_SIMULATOR
+    return;
+#else
+    if (self.xpcConnection || self.applicationLaunchRetryTimer)
+        return;
+
+    if (self.applicationLaunchRetryAttempt >= RPVMaximumBackgroundLaunchRetries) {
+        NSLog(@"*** [reprovisiond] :: Background launch did not connect after %lu attempts; deferring the queued task until the next unlock", (unsigned long)self.applicationLaunchRetryAttempt);
+        self.updateQueuedForUnlock = YES;
+        return;
+    }
+
+    NSUInteger retryExponent = MIN(self.applicationLaunchRetryAttempt, (NSUInteger)3);
+    NSTimeInterval retryDelay = (NSTimeInterval)(1u << retryExponent);
+    self.applicationLaunchRetryAttempt++;
+    self.applicationLaunchRetryTimer = [NSTimer timerWithTimeInterval:retryDelay target:self selector:@selector(_applicationLaunchRetryDidFire:) userInfo:nil repeats:NO];
+    [[NSRunLoop mainRunLoop] addTimer:self.applicationLaunchRetryTimer forMode:NSRunLoopCommonModes];
+    NSLog(@"*** [reprovisiond] :: Retrying background application launch in %.0f second(s)", retryDelay);
+#endif
+}
+
+- (void)_applicationLaunchRetryDidFire:(NSTimer *)timer {
+    self.applicationLaunchRetryTimer = nil;
+
+    if (self.xpcConnection) {
+        self.applicationLaunchRetryAttempt = 0;
+        [self applicationDidLaunch];
+        return;
+    }
+
+    int result = [self _launchApplicationBackgroundedAndAquireAssertion];
+    if (result)
+        NSLog(@"*** [reprovisiond] :: Background application retry failed: %@", SBSApplicationLaunchingErrorString(result));
+
+    if (!self.xpcConnection)
+        [self _scheduleApplicationLaunchRetry];
 }
 
 - (int)_launchApplicationBackgroundedAndAquireAssertion {
@@ -394,9 +523,14 @@ typedef enum : NSUInteger {
 
     int result = SBSLaunchApplicationWithIdentifierAndLaunchOptions(CFSTR(APPLICATION_IDENTIFIER), (__bridge CFDictionaryRef)(launchOptions), 1);
 
+    // Fall back to a suspended launch when the activation options are rejected.
+    if (result != 0)
+        result = SBSLaunchApplicationWithIdentifier(CFSTR(APPLICATION_IDENTIFIER), 1);
+
     NSLog(@"*** [reprovisiond] :: Launched application with result: %d", result);
     if (result == 0 && servicePid == 0) {
         // Aquire assertion now that we're launched.
+        // The retry loop acquires the assertion once SpringBoard registers the PID.
         [self _aquireApplicationBackgroundAssertion];
     }
 
@@ -408,24 +542,49 @@ typedef enum : NSUInteger {
 #if TARGET_OS_SIMULATOR
     return;
 #else
-    pid_t servicePid;
+    pid_t servicePid = 0;
     SBSProcessIDForDisplayIdentifier(CFSTR(APPLICATION_IDENTIFIER), &servicePid);
+    if (self.applicationBackgroundAssertion && self.applicationAssertionPID != servicePid)
+        [self _releaseApplicationBackgroundAssertion];
+
+    if (self.applicationBackgroundAssertion) {
+        // Refresh the watchdog when an active signing pass moves to the background.
+        [self.assertionFallbackTimer invalidate];
+        self.assertionFallbackTimer = [NSTimer timerWithTimeInterval:RPVSigningAssertionFallbackInterval
+                                                               target:self
+                                                             selector:@selector(_assertionFallbackDidFire:)
+                                                             userInfo:nil
+                                                              repeats:NO];
+        [[NSRunLoop mainRunLoop] addTimer:self.assertionFallbackTimer forMode:NSRunLoopCommonModes];
+        return;
+    }
 
     if (servicePid != 0) {
         NSLog(@"*** [reprovisiond] :: Aquiring background assertion");
 
         __weak RPVDaemonListener *weakSelf = self;
+        NSUInteger generation = ++self.applicationAssertionGeneration;
+        self.applicationAssertionPID = servicePid;
 
         self.applicationBackgroundAssertion = [[BKSProcessAssertion alloc] initWithPID:servicePid flags:(BKSProcessAssertionFlagPreventSuspend | BKSProcessAssertionFlagAllowIdleSleep) reason:BKSProcessAssertionReasonFinishTask name:@APPLICATION_IDENTIFIER withHandler:^(BOOL success) {
-            if (success) {
-                // Need to do anything here?
-                NSLog(@"*** [reprovisiond] :: Did aquire background assertion");
+            // Defer the callback because it may run before the property assignment.
+            dispatch_async(dispatch_get_main_queue(), ^{
+                RPVDaemonListener *strongSelf = weakSelf;
+                if (!strongSelf || strongSelf.applicationAssertionGeneration != generation)
+                    return;
 
-                // Start the fallback timer for removing the assertion.
-                weakSelf.assertionFallbackTimer = [NSTimer scheduledTimerWithTimeInterval:60 target:weakSelf selector:@selector(_assertionFallbackDidFire:) userInfo:nil repeats:NO];
-            } else {
-                NSLog(@"*** [reprovisiond] :: Failed to aquire background assertion");
-            }
+                if (success) {
+                    NSLog(@"*** [reprovisiond] :: Did aquire background assertion");
+
+                    // Run the watchdog on the daemon's main run loop.
+                    [strongSelf.assertionFallbackTimer invalidate];
+                    strongSelf.assertionFallbackTimer = [NSTimer timerWithTimeInterval:RPVSigningAssertionFallbackInterval target:strongSelf selector:@selector(_assertionFallbackDidFire:) userInfo:nil repeats:NO];
+                    [[NSRunLoop mainRunLoop] addTimer:strongSelf.assertionFallbackTimer forMode:NSRunLoopCommonModes];
+                } else {
+                    NSLog(@"*** [reprovisiond] :: Failed to aquire background assertion");
+                    [strongSelf _releaseApplicationBackgroundAssertion];
+                }
+            });
         }];
     } else {
         // No PID!
@@ -436,7 +595,27 @@ typedef enum : NSUInteger {
 
 - (void)_assertionFallbackDidFire:(id)sender {
     NSLog(@"*** [reprovisiond] :: Background assertion fallback did fire.");
+    self.activeSigningIdentifier = nil;
     [self _releaseApplicationBackgroundAssertion];
+}
+
+- (void)_acquireSigningPowerAssertion {
+#if !TARGET_OS_SIMULATOR
+    if (self.signingPowerAssertion != kIOPMNullAssertionID)
+        return;
+    // Keep signing eligible during sleep without waking or unlocking the display.
+    NSDictionary *properties = @{
+        (__bridge NSString *)kIOPMAssertionTypeKey: (__bridge NSString *)kIOPMAssertionTypePreventUserIdleSystemSleep,
+        (__bridge NSString *)kIOPMAssertionNameKey: @"ReProvision active signing",
+        (__bridge NSString *)kIOPMAssertionLevelKey: @(kIOPMAssertionLevelOn),
+        (__bridge NSString *)kIOPMAssertionTimeoutKey: @(RPVSigningAssertionFallbackInterval),
+        (__bridge NSString *)kIOPMAssertionTimeoutActionKey: (__bridge NSString *)kIOPMAssertionTimeoutActionTurnOff
+    };
+    IOPMAssertionID assertion = kIOPMNullAssertionID;
+    IOReturn result = IOPMAssertionCreateWithProperties((__bridge CFDictionaryRef)properties, &assertion);
+    if (result == kIOReturnSuccess) self.signingPowerAssertion = assertion;
+    NSLog(@"*** [reprovisiond] :: Signing power assertion result: %d", result);
+#endif
 }
 
 - (void)_releaseApplicationBackgroundAssertion {
@@ -444,6 +623,12 @@ typedef enum : NSUInteger {
     return;
 #else
     NSLog(@"*** [reprovisiond] :: Releasing background assertion");
+    self.applicationAssertionGeneration++;
+    self.applicationAssertionPID = 0;
+    if (self.signingPowerAssertion != kIOPMNullAssertionID) {
+        IOPMAssertionRelease(self.signingPowerAssertion);
+        self.signingPowerAssertion = kIOPMNullAssertionID;
+    }
 
     if (self.assertionFallbackTimer) {
         [self.assertionFallbackTimer invalidate];
@@ -456,6 +641,14 @@ typedef enum : NSUInteger {
 }
 
 - (void)sb_didFinishLaunchingNotification {
+    if (![NSThread isMainThread]) {
+        __weak RPVDaemonListener *weakSelf = self;
+        [self _performOnMainThread:^{
+            [weakSelf sb_didFinishLaunchingNotification];
+        }];
+        return;
+    }
+
     // Give the user a notification if they need to sign in to ReProvision after a respring/restart
     NSLog(@"*** [reprovisiond] :: SpringBoard did start launching.");
 
@@ -465,6 +658,14 @@ typedef enum : NSUInteger {
 }
 
 - (void)sb_didUIUnlockNotification {
+    if (![NSThread isMainThread]) {
+        __weak RPVDaemonListener *weakSelf = self;
+        [self _performOnMainThread:^{
+            [weakSelf sb_didUIUnlockNotification];
+        }];
+        return;
+    }
+
     // Start a signing routine since we had one trigger whilst locked.
     NSLog(@"*** [reprovisiond] :: Device was unlocked.");
 
@@ -473,7 +674,17 @@ typedef enum : NSUInteger {
     // Handle queued signing
     if (self.updateQueuedForUnlock) {
         self.updateQueuedForUnlock = NO;
-        [self _initiateNewSigningRoutine];
+        self.applicationLaunchRetryAttempt = 0;
+
+        if (self.pendingXpcConnectionQueue.count > 0) {
+            int result = [self _launchApplicationBackgroundedAndAquireAssertion];
+            if (result)
+                NSLog(@"*** [reprovisiond] :: Unlock retry failed to launch application: %@", SBSApplicationLaunchingErrorString(result));
+            if (!self.xpcConnection)
+                [self _scheduleApplicationLaunchRetry];
+        } else {
+            [self _initiateNewSigningRoutine];
+        }
 
         // Restart timer now with full duration!
         [self _restartSigningTimerWithInterval:[self heartbeatTimerInterval]];
@@ -490,6 +701,14 @@ typedef enum : NSUInteger {
 }
 
 - (void)bb_backlightChanged:(int)state {
+    if (![NSThread isMainThread]) {
+        __weak RPVDaemonListener *weakSelf = self;
+        [self _performOnMainThread:^{
+            [weakSelf bb_backlightChanged:state];
+        }];
+        return;
+    }
+
     self.displayState = state > 0;
 
     if (state > 0) {
@@ -513,9 +732,8 @@ typedef enum : NSUInteger {
     } else {
         NSLog(@"*** [reprovisiond] :: Display turned off");
 
-        // Stopping timer. If it fires when off, well, likely nothing happens due to be being in deep sleep
-        NSLog(@"*** [reprovisiond] :: DEBUG :: Stopping signing timer due to sleep");
-        [self.signingTimer invalidate];
+        // The daemon stays alive while the display sleeps, so keep its timer armed.
+        NSLog(@"*** [reprovisiond] :: DEBUG :: Keeping signing timer armed while display is off");
     }
 }
 
@@ -530,20 +748,38 @@ typedef enum : NSUInteger {
     [newConnection setExportedInterface:[NSXPCInterface interfaceWithProtocol:@protocol(RPVDaemonProtocol)]];
     [newConnection setExportedObject:self];
 
+    NSXPCConnection *previousConnection = self.xpcConnection;
+    self.xpcConnection = nil;
+    self.xpcConnectionGeneration++;
+    [previousConnection invalidate];
+
     self.xpcConnection = newConnection;
+    NSUInteger connectionGeneration = ++self.xpcConnectionGeneration;
 
     // State management for the main application
     // When it is e.g. killed, then the invalidation handler is called
     __weak RPVDaemonListener *weakSelf = self;
-    self.xpcConnection.interruptionHandler = ^{
-        NSLog(@"*** reprovisiond :: Interruption handler called");
-        [weakSelf.xpcConnection invalidate];
-        weakSelf.xpcConnection = nil;
+    newConnection.interruptionHandler = ^{
+        [weakSelf _performOnMainThread:^{
+            RPVDaemonListener *strongSelf = weakSelf;
+            if (!strongSelf || strongSelf.xpcConnectionGeneration != connectionGeneration)
+                return;
+
+            NSLog(@"*** reprovisiond :: XPC interruption handler called");
+            NSXPCConnection *interruptedConnection = strongSelf.xpcConnection;
+            strongSelf.xpcConnection = nil;
+            [interruptedConnection invalidate];
+        }];
     };
-    self.xpcConnection.invalidationHandler = ^{
-        NSLog(@"*** reprovisiond :: Invalidation handler called");
-        [weakSelf.xpcConnection invalidate];
-        weakSelf.xpcConnection = nil;
+    newConnection.invalidationHandler = ^{
+        [weakSelf _performOnMainThread:^{
+            RPVDaemonListener *strongSelf = weakSelf;
+            if (!strongSelf || strongSelf.xpcConnectionGeneration != connectionGeneration)
+                return;
+
+            NSLog(@"*** reprovisiond :: XPC invalidation handler called");
+            strongSelf.xpcConnection = nil;
+        }];
     };
 
     newConnection.remoteObjectInterface = [NSXPCInterface interfaceWithProtocol:@protocol(RPVApplicationProtocol)];
@@ -553,17 +789,33 @@ typedef enum : NSUInteger {
 }
 
 - (void)applicationDidLaunch {
+    if (![NSThread isMainThread]) {
+        __weak RPVDaemonListener *weakSelf = self;
+        [self _performOnMainThread:^{
+            [weakSelf applicationDidLaunch];
+        }];
+        return;
+    }
+
+    [self.applicationLaunchRetryTimer invalidate];
+    self.applicationLaunchRetryTimer = nil;
+    self.applicationLaunchRetryAttempt = 0;
+
     if (!self.pendingXpcConnectionQueue || self.pendingXpcConnectionQueue.count == 0) {
         NSLog(@"*** reprovisiond :: No pending notifications");
-        [self _releaseApplicationBackgroundAssertion];
+        if (!self.activeSigningIdentifier)
+            [self _releaseApplicationBackgroundAssertion];
 
         return;
     }
 
     NSLog(@"*** reprovisiond :: Forwarding pending notifications");
 
+    // XPC setup confirms the PID is registered; acquire the assertion again here.
+    [self _aquireApplicationBackgroundAssertion];
+
     for (NSNumber *number in self.pendingXpcConnectionQueue) {
-        RPVApplicationNotification notification = [number intValue];
+        RPVApplicationNotification notification = [number unsignedIntegerValue];
 
         switch (notification) {
             case kNewSigningRoutine:
@@ -586,9 +838,54 @@ typedef enum : NSUInteger {
 //////////////////////////////////////////////////////////////////////////
 
 - (void)applicationDidFinishTask {
+    if (![NSThread isMainThread]) {
+        [self _performOnMainThread:^{ [self applicationDidFinishTask]; }];
+        return;
+    }
     NSLog(@"*** [reprovisiond] :: applicationDidFinishTask recieved.");
 
+    if (self.activeSigningIdentifier) {
+        NSLog(@"*** [reprovisiond] :: Keeping execution lease: signing is still active");
+        return;
+    }
     [self _releaseApplicationBackgroundAssertion];
+}
+
+- (void)applicationRequestsSigningAssertionWithIdentifier:(NSString *)identifier {
+    if (![NSThread isMainThread]) {
+        [self _performOnMainThread:^{ [self applicationRequestsSigningAssertionWithIdentifier:identifier]; }];
+        return;
+    }
+    if (![identifier isKindOfClass:NSString.class] || identifier.length == 0 || identifier.length > 128)
+        return;
+    self.activeSigningIdentifier = [identifier copy];
+    [self _aquireApplicationBackgroundAssertion];
+    if (self.applicationBackgroundAssertion)
+        [self _acquireSigningPowerAssertion];
+}
+
+- (void)applicationDidFinishSigningWithIdentifier:(NSString *)identifier {
+    if (![NSThread isMainThread]) {
+        [self _performOnMainThread:^{ [self applicationDidFinishSigningWithIdentifier:identifier]; }];
+        return;
+    }
+    if (!identifier || ![self.activeSigningIdentifier isEqual:identifier])
+        return;
+    self.activeSigningIdentifier = nil;
+    [self _releaseApplicationBackgroundAssertion];
+}
+
+- (void)applicationRequestsSigningAssertion {
+    if (![NSThread isMainThread]) {
+        __weak RPVDaemonListener *weakSelf = self;
+        [self _performOnMainThread:^{
+            [weakSelf applicationRequestsSigningAssertion];
+        }];
+        return;
+    }
+
+    NSLog(@"*** [reprovisiond] :: applicationRequestsSigningAssertion received.");
+    [self _aquireApplicationBackgroundAssertion];
 }
 
 - (void)applicationRequestsDebuggingBackgroundSigning {
@@ -599,16 +896,45 @@ typedef enum : NSUInteger {
 }
 
 - (void)applicationRequestsPreferencesUpdate {
+    if (![NSThread isMainThread]) {
+        __weak RPVDaemonListener *weakSelf = self;
+        [self _performOnMainThread:^{
+            [weakSelf applicationRequestsPreferencesUpdate];
+        }];
+        return;
+    }
+
     NSLog(@"*** [reprovisiond] :: applicationRequestsPreferencesUpdate recieved.");
 
     // Update our internal preferences from NSUserDefaults' shared suite.
     NSTimeInterval oldInterval = [self heartbeatTimerInterval];
+    BOOL oldAutomaticResign = [self shouldAutomaticallyResign];
+    BOOL oldTrueBackgroundResign = [self trueBgResign];
     [self reloadSettings];
     NSTimeInterval newInterval = [self heartbeatTimerInterval];
+    BOOL newAutomaticResign = [self shouldAutomaticallyResign];
+    BOOL newTrueBackgroundResign = [self trueBgResign];
 
-    // Restart if prefs changed!
-    if (oldInterval != newInterval)
+    if (!newAutomaticResign) {
+        [self.signingTimer invalidate];
+        self.signingTimer = nil;
+        [self _cancelAllWakeTimer];
+        return;
+    }
+
+    // Rebuild the timer when any background-signing setting changes.
+    if (oldInterval != newInterval ||
+        oldAutomaticResign != newAutomaticResign ||
+        oldTrueBackgroundResign != newTrueBackgroundResign) {
+        NSDate *storedFireDate = [self getPreferenceKey:@"nextFireDate"];
+        NSTimeInterval remainingInterval = [storedFireDate timeIntervalSinceDate:[NSDate date]];
+        if (oldInterval != newInterval || remainingInterval < 1.0)
+            remainingInterval = newInterval;
+
+        [self _restartSigningTimerWithInterval:remainingInterval];
+    } else if (!self.signingTimer) {
         [self _restartSigningTimerWithInterval:newInterval];
+    }
 }
 
 //////////////////////////////////////////////////////////////////////////

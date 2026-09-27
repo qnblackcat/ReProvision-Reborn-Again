@@ -25,6 +25,7 @@
     
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:REUSE];
     self.tableView.allowsSelection = YES;
+    self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
     
     [self _setupDataSauce];
     [self.tableView reloadData];
@@ -94,7 +95,8 @@
     BOOL isBold = indexPath.row == 0;
     
     cell.textLabel.text = str;
-    cell.textLabel.textColor = isBold ? [UIColor darkTextColor] : [UIColor grayColor];
+    cell.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    cell.textLabel.textColor = isBold ? [UIColor labelColor] : [UIColor secondaryLabelColor];
     cell.textLabel.numberOfLines = 0;
     cell.textLabel.lineBreakMode = NSLineBreakByWordWrapping;
     

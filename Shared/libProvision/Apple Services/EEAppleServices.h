@@ -34,6 +34,8 @@ typedef enum : NSUInteger {
 
 - (void)requestTwoFactorLoginCodeWithCompletionHandler:(void (^)(NSError *))completion;
 
+- (BOOL)hasActiveTwoFactorSession;
+
 - (void)validateLoginCode:(NSString *)code andCompletionHandler:(void (^)(NSError *, NSDictionary *, NSURLCredential *))completionHandler;
 
 - (void)fallback2FACodeRequest:(void (^)(NSError *, NSDictionary *, NSURLCredential *))completionHandler;
@@ -47,6 +49,9 @@ typedef enum : NSUInteger {
  * TODO: Docs!
  */
 - (void)listTeamsWithCompletionHandler:(void (^)(NSError *, NSDictionary *))completionHandler;
+
+// Uses the credentials returned by the matching login operation.
+- (void)listTeamsWithCredentials:(NSURLCredential *)credentials completionHandler:(void (^)(NSError *, NSDictionary *))completionHandler;
 
 /**
  * TODO: Docs!

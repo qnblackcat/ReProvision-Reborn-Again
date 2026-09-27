@@ -15,6 +15,9 @@
 #import "RPVApplicationDatabase.h"
 #import "RPVApplicationDetailController.h"
 #import "RPVIpaBundleApplication.h"
+#if TARGET_OS_SIMULATOR
+#import "RPVAdvancedController.h"
+#endif
 
 #import <RMessageView.h>
 #import "SAMKeychain.h"
@@ -22,6 +25,13 @@
 #import <dlfcn.h>
 #include <notify.h>
 #import <objc/runtime.h>
+#import <TargetConditionals.h>
+
+#if TARGET_OS_SIMULATOR
+@interface RPVAdvancedController (RPVSimulatorBackgroundSigningTest)
+- (void)startBackgroundSign:(id)sender;
+@end
+#endif
 
 @import Firebase;
 
@@ -42,23 +52,125 @@
 @interface AppDelegate ()
 
 @property (nonatomic, strong) NSXPCConnection *daemonConnection;
+@property (nonatomic, readwrite) NSUInteger daemonConnectionGeneration;
+@property (nonatomic, readwrite) NSUInteger daemonReconnectAttempt;
+@property (nonatomic, readwrite) BOOL daemonReconnectScheduled;
+@property (nonatomic, readwrite) BOOL pendingDaemonPreferencesUpdate;
+@property (nonatomic, readwrite) BOOL signingAssertionRequested;
+@property (nonatomic, copy) NSString *signingAssertionIdentifier;
+@property (nonatomic, readwrite) BOOL pendingDebugBackgroundSigning;
+@property (nonatomic, readwrite) BOOL awaitingDebugBackgroundSigningCallback;
+@property (nonatomic, readwrite) BOOL debugBackgroundSigningTestInProgress;
+@property (nonatomic, readwrite) NSUInteger debugBackgroundSigningRequestGeneration;
+@property (nonatomic, strong) NSMutableArray *debugBackgroundSigningCompletionHandlers;
 @property (nonatomic, readwrite) BOOL applicationIsActive;
 @property (nonatomic, readwrite) BOOL pendingDaemonConnectionAlert;
+@property (nonatomic, readwrite) BOOL applicationSigningReportedPerAppError;
 @property (nonatomic) UIAlertController *loadingAlertVC;
+@property (nonatomic, readwrite) BOOL loadingAlertDismissRequested;
 
 @end
 
 @implementation AppDelegate
 
+- (void)_configureAdaptiveAppearance {
+    UIColor *accentColor = [UIColor colorWithRed:147.0 / 255.0
+                                           green:99.0 / 255.0
+                                            blue:207.0 / 255.0
+                                           alpha:1.0];
+
+    self.window.tintColor = accentColor;
+    self.window.backgroundColor = [UIColor systemBackgroundColor];
+
+    UINavigationBarAppearance *navigationAppearance = [[UINavigationBarAppearance alloc] init];
+    [navigationAppearance configureWithDefaultBackground];
+    navigationAppearance.backgroundColor = [UIColor systemBackgroundColor];
+    navigationAppearance.titleTextAttributes = @{ NSForegroundColorAttributeName: [UIColor labelColor] };
+    navigationAppearance.largeTitleTextAttributes = @{ NSForegroundColorAttributeName: [UIColor labelColor] };
+
+    UINavigationBar *navigationBar = [UINavigationBar appearance];
+    navigationBar.tintColor = accentColor;
+    navigationBar.standardAppearance = navigationAppearance;
+    navigationBar.compactAppearance = navigationAppearance;
+    navigationBar.scrollEdgeAppearance = navigationAppearance;
+
+    UITabBarAppearance *tabAppearance = [[UITabBarAppearance alloc] init];
+    [tabAppearance configureWithDefaultBackground];
+    tabAppearance.backgroundColor = [UIColor systemBackgroundColor];
+
+    UITabBar *tabBar = [UITabBar appearance];
+    tabBar.tintColor = accentColor;
+    tabBar.standardAppearance = tabAppearance;
+    tabBar.scrollEdgeAppearance = tabAppearance;
+
+    [UITableView appearance].backgroundColor = [UIColor systemGroupedBackgroundColor];
+}
+
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
-    // Enable Firebase Analytics if the plist file exists
-    if ([[NSFileManager defaultManager] fileExistsAtPath:[[NSBundle mainBundle] pathForResource:@"GoogleService-Info" ofType:@"plist"]]) [FIRApp configure];
+    // Crashlytics touches guarded exception ports on iOS 17, so leave it disabled.
 
     // Override point for customization after application launch.
     [[RPVApplicationSigning sharedInstance] addSigningUpdatesObserver:self];
 
-    // Register to send notifications
+    // Set credential accessibility before XPC can deliver a signing request.
+    [SAMKeychain setAccessibilityType:kSecAttrAccessibleAfterFirstUnlock];
+#if TARGET_OS_SIMULATOR
+    // Simulator-only credentials are supplied explicitly by the UI test process.
+    NSDictionary *environment = [NSProcessInfo processInfo].environment;
+    NSString *simulatorUsername = environment[@"RPV_SIMULATOR_TEST_USERNAME"];
+    NSString *simulatorPassword = environment[@"RPV_SIMULATOR_TEST_PASSWORD"];
+    NSString *simulatorTeamID = environment[@"RPV_SIMULATOR_TEST_TEAM_ID"];
+    if (simulatorUsername.length > 0 && simulatorPassword.length > 0 && simulatorTeamID.length > 0) {
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        [defaults setObject:simulatorUsername forKey:@"cachedUsername"];
+        [defaults setObject:simulatorTeamID forKey:@"cachedTeamID"];
+        [defaults setObject:CURRENT_CREDENTIALS_VERSION forKey:@"credentialsVersion"];
+    }
+
+    // Simulator fixture that opens Advanced settings and runs the real action.
+    if ([environment[@"RPV_SIMULATOR_TEST_BACKGROUND_SIGNING_UI"] boolValue]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            UIViewController *rootController = self.window.rootViewController;
+            UITabBarController *tabController = [rootController isKindOfClass:[UITabBarController class]]
+                ? (UITabBarController *)rootController
+                : nil;
+            if (!tabController) {
+                for (UIViewController *childController in rootController.childViewControllers) {
+                    if ([childController isKindOfClass:[UITabBarController class]]) {
+                        tabController = (UITabBarController *)childController;
+                        break;
+                    }
+                }
+            }
+            if (!tabController || tabController.viewControllers.count == 0)
+                return;
+
+            NSUInteger settingsIndex = tabController.viewControllers.count - 1;
+            UIViewController *settingsController = tabController.viewControllers[settingsIndex];
+            if (![settingsController isKindOfClass:[UINavigationController class]])
+                return;
+
+            RPVAdvancedController *advancedController = [[RPVAdvancedController alloc] init];
+            [(UINavigationController *)settingsController setViewControllers:@[advancedController] animated:NO];
+            tabController.selectedIndex = settingsIndex;
+            [advancedController loadViewIfNeeded];
+            [advancedController startBackgroundSign:nil];
+        });
+    }
+#endif
+    [RPVResources migrateStoredCredentialsForBackgroundAccessIfPossible];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(_protectedDataDidBecomeAvailable:)
+                                                 name:UIApplicationProtectedDataDidBecomeAvailable
+                                               object:nil];
+
+    // Register the fetch mode; the daemon remains responsible for scheduling.
+    [application setMinimumBackgroundFetchInterval:UIApplicationBackgroundFetchIntervalMinimum];
+
+    // Notification permission is requested only on physical devices.
+#if !TARGET_OS_SIMULATOR
     [[RPVNotificationManager sharedInstance] registerToSendNotifications];
+#endif
 
     // Register for background signing notifications.
     [self _setupDameonConnection];
@@ -66,12 +178,8 @@
     // Ensure Chinese devices have internet access
     [self setupChinaApplicationNetworkAccess];
 
-    // Setup Keychain accessibility for when locked.
-    // (prevents not being able to correctly read the passcode when the device is locked)
-    [SAMKeychain setAccessibilityType:kSecAttrAccessibleAfterFirstUnlock];
-
-    // Tint colour
-    [self.window setTintColor:[UIColor colorWithRed:147.0 / 255.0 green:99.0 / 255.0 blue:207.0 / 255.0 alpha:1.0]];
+    // Follow system appearance while keeping ReProvision's purple accent.
+    [self _configureAdaptiveAppearance];
 
     // Stuff for RMessage (iOS 9 only)
     [[RMessageView appearance] setMessageIcon:[UIImage imageNamed:@"notifIcon"]];
@@ -81,6 +189,20 @@
 
 
     return YES;
+}
+
+- (void)_protectedDataDidBecomeAvailable:(NSNotification *)notification {
+    [RPVResources migrateStoredCredentialsForBackgroundAccessIfPossible];
+}
+
+- (void)application:(UIApplication *)application
+performFetchWithCompletionHandler:(void (^)(UIBackgroundFetchResult result))completionHandler {
+    NSLog(@"*** [ReProvision] :: Background-content fetch activation received");
+
+    // A fetch may arrive before XPC; the shared manager coalesces both paths.
+    [[RPVBackgroundSigningManager sharedInstance] attemptBackgroundSigningIfNecessary:^{
+        completionHandler(UIBackgroundFetchResultNewData);
+    }];
 }
 
 - (void)applicationWillResignActive:(UIApplication *)application {
@@ -103,9 +225,11 @@
     // nop
     NSLog(@"*** [ReProvision] :: applicationDidBecomeActive");
 
-    if (![[NSFileManager defaultManager] fileExistsAtPath:@"/var/lib/dpkg/info/jp.soh.reprovision.list"]) exit(1);
-
     self.applicationIsActive = YES;
+    if (!self.daemonConnection && !self.daemonReconnectScheduled) {
+        self.daemonReconnectAttempt = 0;
+        [self _setupDameonConnection];
+    }
     if (self.pendingDaemonConnectionAlert) {
         [self _notifyDaemonFailedToConnect];
         self.pendingDaemonConnectionAlert = NO;
@@ -118,12 +242,17 @@
 }
 
 - (BOOL)application:(UIApplication *)application openURL:(NSURL *)url sourceApplication:(NSString *)sourceApplication annotation:(id)annotation {
-    [self showLoadingAlert];
-
     // Guard case
     if (![[[url pathExtension] lowercaseString] isEqualToString:@"ipa"] && ![[url scheme] isEqualToString:@"reprovision"]) {
+        [self showLoadingAlert];
         [self changeLoadingAlertText:@"Error - Invalid URL" dismissAfterDelay:2];
         return NO;
+    }
+
+    // Local imports are synchronous and do not need a loading alert.
+    if ([url isFileURL] && [[[url pathExtension] lowercaseString] isEqualToString:@"ipa"]) {
+        [self _showApplicationDetailControllerFromFileURL:url];
+        return YES;
     }
 
     // Handle opening from URL scheme
@@ -138,7 +267,6 @@
 
         // Incoming URL is a fileURL!
         [self _showApplicationDetailControllerFromFileURL:url];
-        [self dismissLoadingAlert];
 
     } else if ([[url scheme] isEqualToString:@"reprovision"] && [[url host] containsString:@"install"] && [url query]) {
         // For other applications
@@ -160,9 +288,13 @@
         // Next, check whether the same file exist on tmp folder.
         // If exist, delete it.
         if (!queries[@"url"]) {
+            [self showLoadingAlert];
             [self changeLoadingAlertText:@"Invalid URL" dismissAfterDelay:2];
             return NO;
         }
+
+        // Remote downloads dismiss this alert from their URLSession callbacks.
+        [self showLoadingAlert];
 
         NSURL *tmpFolderPath = [NSURL fileURLWithPath:NSTemporaryDirectory()];
         NSString *originalFileName = [queries[@"url"] lastPathComponent];
@@ -211,17 +343,47 @@
 }
 
 - (void)showLoadingAlert {
-    self.loadingAlertVC = [UIAlertController alertControllerWithTitle:nil
-                                                              message:@"Loading..."
-                                                       preferredStyle:UIAlertControllerStyleAlert];
-    [[UIApplication sharedApplication].keyWindow.rootViewController presentViewController:self.loadingAlertVC animated:YES completion:nil];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.loadingAlertVC) {
+            [self.loadingAlertVC dismissViewControllerAnimated:NO completion:nil];
+        }
+
+        self.loadingAlertDismissRequested = NO;
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil
+                                                                        message:@"Loading..."
+                                                                 preferredStyle:UIAlertControllerStyleAlert];
+        self.loadingAlertVC = alert;
+
+        UIViewController *presenter = [UIApplication sharedApplication].keyWindow.rootViewController;
+        while (presenter.presentedViewController) {
+            presenter = presenter.presentedViewController;
+        }
+
+        [presenter presentViewController:alert animated:YES completion:^{
+            if (self.loadingAlertVC == alert && self.loadingAlertDismissRequested) {
+                [self dismissLoadingAlert];
+            }
+        }];
+    });
 }
 
 - (void)dismissLoadingAlert {
-    if (self.loadingAlertVC) {
-        [self.loadingAlertVC dismissViewControllerAnimated:YES completion:nil];
-        self.loadingAlertVC = nil;
-    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = self.loadingAlertVC;
+        if (!alert) return;
+
+        self.loadingAlertDismissRequested = YES;
+
+        // If presentation is still in flight, its completion retries dismissal.
+        if (!alert.presentingViewController && !alert.view.window) return;
+
+        [alert dismissViewControllerAnimated:YES completion:^{
+            if (self.loadingAlertVC == alert) {
+                self.loadingAlertVC = nil;
+                self.loadingAlertDismissRequested = NO;
+            }
+        }];
+    });
 }
 
 - (void)updateLoadingAlertWithProgress:(int)progress {
@@ -233,13 +395,14 @@
 }
 
 - (void)changeLoadingAlertText:(NSString *)text dismissAfterDelay:(int)delay {
-    if (self.loadingAlertVC) {
-        self.loadingAlertVC.message = text;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!self.loadingAlertVC) return;
 
+        self.loadingAlertVC.message = text;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [self dismissLoadingAlert];
         });
-    }
+    });
 }
 
 - (void)application:(UIApplication *)application performActionForShortcutItem:(UIApplicationShortcutItem *)shortcutItem completionHandler:(void (^)(BOOL succeeded))completionHandler {
@@ -254,27 +417,36 @@
 - (void)setupChinaApplicationNetworkAccess {
     // See: https://github.com/pwn20wndstuff/Undecimus/issues/136
 
-    NSOperatingSystemVersion version;
-    version.majorVersion = 12;
-    version.minorVersion = 0;
-    version.patchVersion = 0;
+#if TARGET_OS_SIMULATOR
+    return;
+#endif
 
     // it is unable to load SettingsCellular.framework weakly as bitcode is enabled on this project
     // so we have to load it manually if the device is on iOS13+
     void *settingsCellular = dlopen("/System/Library/PrivateFrameworks/SettingsCellular.framework/SettingsCellular", RTLD_LAZY);
 
-    if (objc_getClass("PSAppDataUsagePolicyCache")) {
-        // iOS 12+
-        PSAppDataUsagePolicyCache *cache = [objc_getClass("PSAppDataUsagePolicyCache") sharedInstance];
-        [cache setUsagePoliciesForBundle:[NSBundle mainBundle].bundleIdentifier cellular:YES wifi:YES];
-    } else if (objc_getClass("AppWirelessDataUsageManager")) {
-        // iOS 10 - 11
-        [objc_getClass("AppWirelessDataUsageManager") setAppWirelessDataOption:[NSNumber numberWithInt:3]
-                                                           forBundleIdentifier:[NSBundle mainBundle].bundleIdentifier
-                                                             completionHandler:nil];
-        [objc_getClass("AppWirelessDataUsageManager") setAppCellularDataEnabled:[NSNumber numberWithInt:1]
-                                                            forBundleIdentifier:[NSBundle mainBundle].bundleIdentifier
-                                                              completionHandler:nil];
+    @try {
+        Class policyCacheClass = objc_getClass("PSAppDataUsagePolicyCache");
+        PSAppDataUsagePolicyCache *cache = [policyCacheClass respondsToSelector:@selector(sharedInstance)] ? [policyCacheClass sharedInstance] : nil;
+        if ([cache respondsToSelector:@selector(setUsagePoliciesForBundle:cellular:wifi:)]) {
+            // iOS 12 through versions that still expose this private selector.
+            [cache setUsagePoliciesForBundle:[NSBundle mainBundle].bundleIdentifier cellular:YES wifi:YES];
+        } else {
+            Class wirelessManagerClass = objc_getClass("AppWirelessDataUsageManager");
+            if ([wirelessManagerClass respondsToSelector:@selector(setAppWirelessDataOption:forBundleIdentifier:completionHandler:)] &&
+                [wirelessManagerClass respondsToSelector:@selector(setAppCellularDataEnabled:forBundleIdentifier:completionHandler:)]) {
+                // iOS 10 - 11 fallback.
+                [wirelessManagerClass setAppWirelessDataOption:[NSNumber numberWithInt:3]
+                                           forBundleIdentifier:[NSBundle mainBundle].bundleIdentifier
+                                             completionHandler:nil];
+                [wirelessManagerClass setAppCellularDataEnabled:[NSNumber numberWithInt:1]
+                                            forBundleIdentifier:[NSBundle mainBundle].bundleIdentifier
+                                              completionHandler:nil];
+            }
+        }
+    } @catch (NSException *exception) {
+        // Cellular policy setup is optional and must not block launch.
+        NSLog(@"*** [ReProvision] :: Unable to configure wireless data policy: %@", exception);
     }
 
     // close SettingsCellular as it is not needed anymore.
@@ -288,6 +460,17 @@
 //////////////////////////////////////////////////////////////////////////////////
 
 - (void)applicationSigningDidStart {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self applicationSigningDidStart]; });
+        return;
+    }
+    // A duplicate request does not own the active pass's execution lease.
+    if (self.signingAssertionRequested)
+        return;
+    self.applicationSigningReportedPerAppError = NO;
+    self.signingAssertionRequested = YES;
+    self.signingAssertionIdentifier = NSUUID.UUID.UUIDString;
+    [self _requestSigningAssertionFromDaemon];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"jp.soh.reprovision/signingInProgress" object:nil];
     NSLog(@"Started signing...");
 }
@@ -328,10 +511,15 @@
 }
 
 - (void)applicationSigningDidEncounterError:(NSError *)error forBundleIdentifier:(NSString *)bundleIdentifier {
+    self.applicationSigningReportedPerAppError = YES;
     NSLog(@"'%@' had error: %@", bundleIdentifier, error);
 
     NSString *applicationName = [[[RPVApplicationDatabase sharedInstance] getApplicationContainsBundleIdentifier:bundleIdentifier] applicationName];
-    [[RPVNotificationManager sharedInstance] sendNotificationWithTitle:@"Error" body:[NSString stringWithFormat:@"For '%@':\n%@", applicationName, error.localizedDescription] isDebugMessage:NO isUrgentMessage:YES andNotificationID:nil];
+    if (applicationName.length == 0) {
+        applicationName = bundleIdentifier.length > 0 ? bundleIdentifier : @"Unknown application";
+    }
+    NSString *errorDescription = error.localizedDescription.length > 0 ? error.localizedDescription : @"An unknown signing error occurred.";
+    [[RPVNotificationManager sharedInstance] sendNotificationWithTitle:@"Error" body:[NSString stringWithFormat:@"For '%@':\n%@", applicationName, errorDescription] isDebugMessage:NO isUrgentMessage:YES andNotificationID:nil];
 
     // Ensure the UI goes back to when signing was not occuring
     NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
@@ -342,6 +530,12 @@
 }
 
 - (void)applicationSigningCompleteWithError:(NSError *)error {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self applicationSigningCompleteWithError:error]; });
+        return;
+    }
+    if (error.code == RPVErrorAlreadyUndertakingPipeline)
+        return;
     NSLog(@"Completed signing, with error: %@", error);
     [[NSNotificationCenter defaultCenter] postNotificationName:@"jp.soh.reprovision/signingComplete" object:nil];
 
@@ -352,8 +546,23 @@
                 [[RPVNotificationManager sharedInstance] sendNotificationWithTitle:@"Success" body:@"No applications require signing at this time" isDebugMessage:NO isUrgentMessage:NO andNotificationID:nil];
                 break;
             default:
-                [[RPVNotificationManager sharedInstance] sendNotificationWithTitle:@"Error" body:error.localizedDescription isDebugMessage:NO isUrgentMessage:YES andNotificationID:nil];
+                // The per-application notification already contains this error.
+                if (!self.applicationSigningReportedPerAppError) {
+                    [[RPVNotificationManager sharedInstance] sendNotificationWithTitle:@"Error" body:error.localizedDescription isDebugMessage:NO isUrgentMessage:YES andNotificationID:nil];
+                }
                 break;
+        }
+    }
+    self.applicationSigningReportedPerAppError = NO;
+    if (self.signingAssertionRequested) {
+        NSString *finishedIdentifier = self.signingAssertionIdentifier;
+        self.signingAssertionRequested = NO;
+        self.signingAssertionIdentifier = nil;
+        @try {
+            [[self.daemonConnection remoteObjectProxy] applicationDidFinishSigningWithIdentifier:finishedIdentifier];
+        } @catch (NSException *exception) {
+            // The daemon watchdog cleans up if XPC is lost.
+            NSLog(@"*** [ReProvision] :: Signing lease completion could not be delivered");
         }
     }
 }
@@ -445,61 +654,155 @@
 //////////////////////////////////////////////////////////////////////////////
 
 - (void)_setupDameonConnection {
-    /*#if TARGET_OS_SIMULATOR
+#if TARGET_OS_SIMULATOR
     return;
-#endif*/
+#endif
 
-    if (self.daemonConnection) {
-        [self.daemonConnection invalidate];
-        self.daemonConnection = nil;
+    if (![NSThread isMainThread]) {
+        __weak AppDelegate *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf _setupDameonConnection];
+        });
+        return;
     }
 
-    self.daemonConnection = [[NSXPCConnection alloc] initWithMachServiceName:@"jp.soh.reprovisiond"];
-    self.daemonConnection.remoteObjectInterface = [NSXPCInterface interfaceWithProtocol:@protocol(RPVDaemonProtocol)];
+    if (self.daemonConnection) {
+        NSXPCConnection *previousConnection = self.daemonConnection;
+        self.daemonConnection = nil;
+        self.daemonConnectionGeneration++;
+        [previousConnection invalidate];
+    }
 
-    self.daemonConnection.exportedInterface = [NSXPCInterface interfaceWithProtocol:@protocol(RPVApplicationProtocol)];
-    self.daemonConnection.exportedObject = self;
+    NSXPCConnection *connection = [[NSXPCConnection alloc] initWithMachServiceName:@"jp.soh.reprovisiond"];
+    connection.remoteObjectInterface = [NSXPCInterface interfaceWithProtocol:@protocol(RPVDaemonProtocol)];
 
-    [self.daemonConnection resume];
+    connection.exportedInterface = [NSXPCInterface interfaceWithProtocol:@protocol(RPVApplicationProtocol)];
+    connection.exportedObject = self;
 
-    // Handle connection errors
+    self.daemonConnection = connection;
+    NSUInteger connectionGeneration = ++self.daemonConnectionGeneration;
+
+    // Generations keep stale callbacks from clearing a replacement connection.
     __weak AppDelegate *weakSelf = self;
-    self.daemonConnection.interruptionHandler = ^{
-        NSLog(@"interruption handler called");
+    connection.interruptionHandler = ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AppDelegate *strongSelf = weakSelf;
+            if (!strongSelf || strongSelf.daemonConnectionGeneration != connectionGeneration)
+                return;
 
-        [weakSelf.daemonConnection invalidate];
-        weakSelf.daemonConnection = nil;
-
-        // Re-create connection
-        [weakSelf _setupDameonConnection];
+            NSLog(@"*** [ReProvision] :: Daemon connection interrupted");
+            NSXPCConnection *interruptedConnection = strongSelf.daemonConnection;
+            strongSelf.daemonConnection = nil;
+            [interruptedConnection invalidate];
+            [strongSelf _scheduleDaemonReconnect];
+        });
     };
 
-    self.daemonConnection.invalidationHandler = ^{
-        NSLog(@"invalidation handler called");
+    connection.invalidationHandler = ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AppDelegate *strongSelf = weakSelf;
+            if (!strongSelf || strongSelf.daemonConnectionGeneration != connectionGeneration)
+                return;
 
-        [weakSelf.daemonConnection invalidate];
-        weakSelf.daemonConnection = nil;
-
-        // Notify of failed connection
-        [weakSelf _notifyDaemonFailedToConnect];
+            NSLog(@"*** [ReProvision] :: Daemon connection invalidated");
+            strongSelf.daemonConnection = nil;
+            [strongSelf _scheduleDaemonReconnect];
+        });
     };
+
+    [connection resume];
 
     // Notify daemon that we've now launched
     @try {
-        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *_Nonnull error) {
+        [[connection remoteObjectProxyWithErrorHandler:^(NSError *_Nonnull error) {
             NSLog(@"%@", error);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                AppDelegate *strongSelf = weakSelf;
+                if (!strongSelf || strongSelf.daemonConnectionGeneration != connectionGeneration)
+                    return;
 
-            if (error.code == NSXPCConnectionInvalid) {
-                [weakSelf _notifyDaemonFailedToConnect];
-            }
+                NSXPCConnection *failedConnection = strongSelf.daemonConnection;
+                strongSelf.daemonConnection = nil;
+                [failedConnection invalidate];
+                [strongSelf _scheduleDaemonReconnect];
+            });
         }] applicationDidLaunch];
 
     } @catch (NSException *e) {
+        self.daemonConnection = nil;
+        [connection invalidate];
+        [self _scheduleDaemonReconnect];
+        return;
+    }
+
+    if (self.pendingDaemonPreferencesUpdate) {
+        self.pendingDaemonPreferencesUpdate = NO;
+        [[connection remoteObjectProxyWithErrorHandler:^(NSError *_Nonnull error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                weakSelf.pendingDaemonPreferencesUpdate = YES;
+                [weakSelf _scheduleDaemonReconnect];
+            });
+        }] applicationRequestsPreferencesUpdate];
+    }
+
+    if (self.signingAssertionRequested) {
+        [self _requestSigningAssertionFromDaemon];
+    }
+
+    if (self.pendingDebugBackgroundSigning) {
+        [self _sendPendingDebugBackgroundSigningRequest];
+    }
+
+    // A stable connection ends the current retry sequence.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        AppDelegate *strongSelf = weakSelf;
+        if (strongSelf &&
+            strongSelf.daemonConnectionGeneration == connectionGeneration &&
+            strongSelf.daemonConnection) {
+            strongSelf.daemonReconnectAttempt = 0;
+            strongSelf.pendingDaemonConnectionAlert = NO;
+        }
+    });
+
+    NSLog(@"*** [ReProvision] :: Setup daemon connection generation %lu: %@", (unsigned long)connectionGeneration, connection);
+}
+
+- (void)_scheduleDaemonReconnect {
+#if TARGET_OS_SIMULATOR
+    return;
+#endif
+
+    if (![NSThread isMainThread]) {
+        __weak AppDelegate *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf _scheduleDaemonReconnect];
+        });
+        return;
+    }
+
+    if (self.daemonConnection || self.daemonReconnectScheduled)
+        return;
+
+    if (self.daemonReconnectAttempt >= 5) {
         [self _notifyDaemonFailedToConnect];
         return;
     }
 
-    NSLog(@"*** [ReProvision] :: Setup daemon connection: %@", self.daemonConnection);
+    NSUInteger exponent = MIN(self.daemonReconnectAttempt, (NSUInteger)3);
+    NSTimeInterval delay = (NSTimeInterval)(1u << exponent);
+    self.daemonReconnectAttempt++;
+    self.daemonReconnectScheduled = YES;
+
+    __weak AppDelegate *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        AppDelegate *strongSelf = weakSelf;
+        if (!strongSelf)
+            return;
+
+        strongSelf.daemonReconnectScheduled = NO;
+        if (!strongSelf.daemonConnection)
+            [strongSelf _setupDameonConnection];
+    });
 }
 
 - (void)_notifyDaemonFailedToConnect {
@@ -523,6 +826,13 @@
 }
 
 - (void)_notifyDaemonOfMessageHandled {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self _notifyDaemonOfMessageHandled]; });
+        return;
+    }
+    // Only signing completion may release an active signing lease.
+    if (self.signingAssertionRequested)
+        return;
     // Let the daemon know to release the background assertion.
     @try {
         [[self.daemonConnection remoteObjectProxy] applicationDidFinishTask];
@@ -531,28 +841,105 @@
     }
 }
 
+- (void)_requestSigningAssertionFromDaemon {
+#if TARGET_OS_SIMULATOR
+    return;
+#endif
+
+    if (![NSThread isMainThread]) {
+        __weak AppDelegate *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf _requestSigningAssertionFromDaemon];
+        });
+        return;
+    }
+
+    if (!self.signingAssertionRequested)
+        return;
+
+    if (!self.daemonConnection) {
+        [self _scheduleDaemonReconnect];
+        return;
+    }
+
+    NSUInteger connectionGeneration = self.daemonConnectionGeneration;
+    __weak AppDelegate *weakSelf = self;
+    @try {
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *_Nonnull error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                AppDelegate *strongSelf = weakSelf;
+                if (!strongSelf || !strongSelf.signingAssertionRequested ||
+                    strongSelf.daemonConnectionGeneration != connectionGeneration)
+                    return;
+                NSLog(@"*** [ReProvision] :: Could not request signing assertion: %@", error);
+                [strongSelf _scheduleDaemonReconnect];
+            });
+        }] applicationRequestsSigningAssertionWithIdentifier:self.signingAssertionIdentifier];
+    } @catch (NSException *exception) {
+        NSLog(@"*** [ReProvision] :: Signing assertion request raised: %@", exception);
+        [self _scheduleDaemonReconnect];
+    }
+}
+
 - (void)daemonDidRequestNewBackgroundSigning {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self daemonDidRequestNewBackgroundSigning]; });
+        return;
+    }
     NSLog(@"*** [ReProvision] :: daemonDidRequestNewBackgroundSigning");
+
+    BOOL completesDebuggingRequest = self.awaitingDebugBackgroundSigningCallback;
+    if (completesDebuggingRequest) {
+        self.awaitingDebugBackgroundSigningCallback = NO;
+        NSUInteger signingGeneration = ++self.debugBackgroundSigningRequestGeneration;
+        __weak AppDelegate *weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 180 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            AppDelegate *strongSelf = weakSelf;
+            if (!strongSelf ||
+                !strongSelf.debugBackgroundSigningTestInProgress ||
+                strongSelf.debugBackgroundSigningRequestGeneration != signingGeneration)
+                return;
+
+            NSError *timeoutError = [NSError errorWithDomain:@"jp.soh.reprovision.background-signing"
+                                                         code:4
+                                                     userInfo:@{NSLocalizedDescriptionKey:
+                                                                    @"The daemon started the background test, but signing did not finish. Check your network connection and try again."}];
+            [strongSelf _completeDebugBackgroundSigningRequestWithError:timeoutError];
+        });
+    }
 
     // Start a background sign
     UIApplication *application = [UIApplication sharedApplication];
+    __block BOOL backgroundRequestFinished = NO;
     UIBackgroundTaskIdentifier __block bgTask = [application beginBackgroundTaskWithName:@"ReProvision Background Signing" expirationHandler:^{
-        [application endBackgroundTask:bgTask];
-        bgTask = UIBackgroundTaskInvalid;
-
-        [self performSelector:@selector(_notifyDaemonOfMessageHandled) withObject:nil afterDelay:5];
+        if (backgroundRequestFinished)
+            return;
+        backgroundRequestFinished = YES;
+        if (bgTask != UIBackgroundTaskInvalid) {
+            [application endBackgroundTask:bgTask];
+            bgTask = UIBackgroundTaskInvalid;
+        }
+        [self _notifyDaemonOfMessageHandled];
     }];
 
-    [[RPVBackgroundSigningManager sharedInstance] attemptBackgroundSigningIfNecessary:^{
+    [[RPVBackgroundSigningManager sharedInstance] attemptBackgroundSigningIfNecessaryWithCompletion:^(NSError *signingError) {
         // Ask to remove our process assertion 5 seconds later, so that we can assume any notifications
         // have been scheduled.
 
+        if (completesDebuggingRequest)
+            [self _completeDebugBackgroundSigningRequestWithError:signingError];
+
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            if (backgroundRequestFinished)
+                return;
+            backgroundRequestFinished = YES;
             [self _notifyDaemonOfMessageHandled];
 
             // Done, so stop this background task.
-            [application endBackgroundTask:bgTask];
-            bgTask = UIBackgroundTaskInvalid;
+            if (bgTask != UIBackgroundTaskInvalid) {
+                [application endBackgroundTask:bgTask];
+                bgTask = UIBackgroundTaskInvalid;
+            }
         });
     }];
 }
@@ -592,18 +979,139 @@
 }
 
 - (void)requestDebuggingBackgroundSigning {
+    [self requestDebuggingBackgroundSigningWithCompletion:nil];
+}
+
+- (void)requestDebuggingBackgroundSigningWithCompletion:(void (^)(NSError *error))completionHandler {
+    if (![NSThread isMainThread]) {
+        __weak AppDelegate *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf requestDebuggingBackgroundSigningWithCompletion:completionHandler];
+        });
+        return;
+    }
+
+    if (!self.debugBackgroundSigningCompletionHandlers)
+        self.debugBackgroundSigningCompletionHandlers = [NSMutableArray array];
+    if (completionHandler)
+        [self.debugBackgroundSigningCompletionHandlers addObject:[completionHandler copy]];
+
+    // Join repeated taps to the current request.
+    if (self.debugBackgroundSigningTestInProgress)
+        return;
+
+    self.debugBackgroundSigningTestInProgress = YES;
+    self.pendingDebugBackgroundSigning = YES;
+    NSUInteger requestGeneration = ++self.debugBackgroundSigningRequestGeneration;
+
+    // Time out if the daemon never starts the test.
+    __weak AppDelegate *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        AppDelegate *strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.debugBackgroundSigningRequestGeneration != requestGeneration)
+            return;
+        if (!strongSelf.debugBackgroundSigningTestInProgress ||
+            (!strongSelf.pendingDebugBackgroundSigning && !strongSelf.awaitingDebugBackgroundSigningCallback))
+            return;
+
+        NSError *timeoutError = [NSError errorWithDomain:@"jp.soh.reprovision.background-signing"
+                                                     code:3
+                                                 userInfo:@{NSLocalizedDescriptionKey:
+                                                                @"The background daemon did not start the signing test. Reinstall ReProvision or reboot the device, then try again."}];
+        [strongSelf _completeDebugBackgroundSigningRequestWithError:timeoutError];
+    });
+
+#if TARGET_OS_SIMULATOR
+    // Run the same manager locally when the simulator has no daemon.
+    self.pendingDebugBackgroundSigning = NO;
+    self.awaitingDebugBackgroundSigningCallback = YES;
+    [self daemonDidRequestNewBackgroundSigning];
+#else
+    if (!self.daemonConnection) {
+        [self _scheduleDaemonReconnect];
+        return;
+    }
+
+    [self _sendPendingDebugBackgroundSigningRequest];
+#endif
+}
+
+- (void)_sendPendingDebugBackgroundSigningRequest {
+    if (!self.pendingDebugBackgroundSigning || !self.daemonConnection)
+        return;
+
+    self.pendingDebugBackgroundSigning = NO;
+    self.awaitingDebugBackgroundSigningCallback = YES;
+
     @try {
-        [[self.daemonConnection remoteObjectProxy] applicationRequestsDebuggingBackgroundSigning];
+        __weak AppDelegate *weakSelf = self;
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *_Nonnull error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                weakSelf.awaitingDebugBackgroundSigningCallback = NO;
+                weakSelf.pendingDebugBackgroundSigning = YES;
+                NSXPCConnection *failedConnection = weakSelf.daemonConnection;
+                weakSelf.daemonConnection = nil;
+                weakSelf.daemonConnectionGeneration++;
+                [failedConnection invalidate];
+                [weakSelf _scheduleDaemonReconnect];
+            });
+        }] applicationRequestsDebuggingBackgroundSigning];
     } @catch (NSException *e) {
-        // Error previous shown
+        self.awaitingDebugBackgroundSigningCallback = NO;
+        self.pendingDebugBackgroundSigning = YES;
+        NSXPCConnection *failedConnection = self.daemonConnection;
+        self.daemonConnection = nil;
+        self.daemonConnectionGeneration++;
+        [failedConnection invalidate];
+        [self _scheduleDaemonReconnect];
     }
 }
 
+- (void)_completeDebugBackgroundSigningRequestWithError:(NSError *)error {
+    self.pendingDebugBackgroundSigning = NO;
+    self.awaitingDebugBackgroundSigningCallback = NO;
+    self.debugBackgroundSigningTestInProgress = NO;
+    self.debugBackgroundSigningRequestGeneration++;
+
+    NSArray *completionHandlers = [self.debugBackgroundSigningCompletionHandlers copy];
+    [self.debugBackgroundSigningCompletionHandlers removeAllObjects];
+
+    // Use a notification when Settings is no longer active.
+    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) {
+        BOOL noSigningRequired = error && error.code == RPVErrorNoSigningRequired;
+        NSString *title = (!error || noSigningRequired) ? @"Background Signing Works" : @"Background Signing Failed";
+        NSString *body = noSigningRequired
+            ? @"The daemon completed the background check. No applications need signing right now."
+            : (error ? error.localizedDescription : @"The daemon completed the background signing test successfully.");
+        [[RPVNotificationManager sharedInstance] sendNotificationWithTitle:title
+                                                                       body:body
+                                                             isDebugMessage:NO
+                                                            isUrgentMessage:YES
+                                                        andNotificationID:@"backgroundSigningTest"];
+    }
+
+    for (void (^handler)(NSError *) in completionHandlers)
+        handler(error);
+}
+
 - (void)requestPreferencesUpdate {
+    if (!self.daemonConnection) {
+        self.pendingDaemonPreferencesUpdate = YES;
+        [self _scheduleDaemonReconnect];
+        return;
+    }
+
     @try {
-        [[self.daemonConnection remoteObjectProxy] applicationRequestsPreferencesUpdate];
+        __weak AppDelegate *weakSelf = self;
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *_Nonnull error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                weakSelf.pendingDaemonPreferencesUpdate = YES;
+                [weakSelf _scheduleDaemonReconnect];
+            });
+        }] applicationRequestsPreferencesUpdate];
     } @catch (NSException *e) {
-        // Error previous shown
+        self.pendingDaemonPreferencesUpdate = YES;
+        [self _scheduleDaemonReconnect];
     }
 }
 

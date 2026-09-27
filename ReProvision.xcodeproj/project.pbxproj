@@ -141,6 +141,7 @@
 		C985A50C23A582F200A443A9 /* RPVLoginFallbackImpl.m in Sources */ = {isa = PBXBuildFile; fileRef = C985A50B23A582F200A443A9 /* RPVLoginFallbackImpl.m */; };
 		C996746620EE314B00EEFBD2 /* PackageVersion.plist in Resources */ = {isa = PBXBuildFile; fileRef = C996746520EE314B00EEFBD2 /* PackageVersion.plist */; };
 		C99722A5237A145F009822FC /* RPVAuthentication.m in Sources */ = {isa = PBXBuildFile; fileRef = C99722A4237A145F009822FC /* RPVAuthentication.m */; };
+		D0A000032026082600000003 /* RPVRemoteAnisetteProvider.m in Sources */ = {isa = PBXBuildFile; fileRef = D0A000022026082600000002 /* RPVRemoteAnisetteProvider.m */; };
 		C99C883623D0C36500CC48BB /* RPVFullscreenAlertController.m in Sources */ = {isa = PBXBuildFile; fileRef = C99C883523D0C36500CC48BB /* RPVFullscreenAlertController.m */; };
 		C9A9446D2215FADD00F5C556 /* root.pem in Resources */ = {isa = PBXBuildFile; fileRef = C9A9446C2215FADC00F5C556 /* root.pem */; };
 		C9C5921D21206E1000DF2E19 /* RPVInstalledViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = C96FBFE120EB9DF0007E2EC3 /* RPVInstalledViewController.m */; };
@@ -458,6 +459,8 @@
 		C996746520EE314B00EEFBD2 /* PackageVersion.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = PackageVersion.plist; sourceTree = "<group>"; };
 		C99722A3237A145F009822FC /* RPVAuthentication.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RPVAuthentication.h; sourceTree = "<group>"; };
 		C99722A4237A145F009822FC /* RPVAuthentication.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RPVAuthentication.m; sourceTree = "<group>"; };
+		D0A000012026082600000001 /* RPVRemoteAnisetteProvider.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RPVRemoteAnisetteProvider.h; sourceTree = "<group>"; };
+		D0A000022026082600000002 /* RPVRemoteAnisetteProvider.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RPVRemoteAnisetteProvider.m; sourceTree = "<group>"; };
 		C99C883423D0C36500CC48BB /* RPVFullscreenAlertController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RPVFullscreenAlertController.h; sourceTree = "<group>"; };
 		C99C883523D0C36500CC48BB /* RPVFullscreenAlertController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RPVFullscreenAlertController.m; sourceTree = "<group>"; };
 		C9A371152311D25B00DD5040 /* RPVDaemonProtocol.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RPVDaemonProtocol.h; sourceTree = "<group>"; };
@@ -1203,6 +1206,8 @@
 				87BDA6FC237821CA00EA4540 /* AuthKit.h */,
 				C99722A3237A145F009822FC /* RPVAuthentication.h */,
 				C99722A4237A145F009822FC /* RPVAuthentication.m */,
+				D0A000012026082600000001 /* RPVRemoteAnisetteProvider.h */,
+				D0A000022026082600000002 /* RPVRemoteAnisetteProvider.m */,
 				C9C6EA772004280A00211FDD /* EEAppleServices.h */,
 				C9C6EA782004280A00211FDD /* EEAppleServices.m */,
 				C9C6EA792004280A00211FDD /* NSData+GZIP.h */,
@@ -1903,7 +1908,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-iOS/Pods-iOS-resources.sh\"\n";
+			shellScript = "if [ \"${ROOTLESS_PACKAGE}\" = \"1\" ] || [ \"${SIMULATOR_BUILD}\" = \"1\" ]; then\n    exit 0\nfi\n\"${PODS_ROOT}/Target Support Files/Pods-iOS/Pods-iOS-resources.sh\"\n";
 			showEnvVarsInLog = 0;
 		};
 		53FC45EE426D286757D6B5E7 /* [CP] Check Pods Manifest.lock */ = {
@@ -1962,7 +1967,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "echo \"Copying application into Package\"\n\n# Clean out existing .app\nrm -rf \"${PROJECT_DIR}/iOS/Package/Applications/${CONTENTS_FOLDER_PATH}\"\n\nbuiltpath=\"${BUILD_DIR}/${CONFIGURATION}${EFFECTIVE_PLATFORM_NAME}/${CONTENTS_FOLDER_PATH}\"\ncp -R $builtpath \"${PROJECT_DIR}/iOS/Package/Applications/\"\n\n# Sign with entitlements\n${PROJECT_DIR}/bin/ldid2 -S\"${PROJECT_DIR}/Shared/entitlements.xml\" \"${PROJECT_DIR}/iOS/Package/Applications/${EXECUTABLE_PATH}\"\n\n# Do the same for the sharing extension\n${PROJECT_DIR}/bin/ldid2 -S\"${PROJECT_DIR}/Shared/entitlements.xml\" \"${PROJECT_DIR}/iOS/Package/Applications/${CONTENTS_FOLDER_PATH}/Plugins/Share.appex/Share\"\n\n# Build package!\n${PROJECT_DIR}/bin/iosod build -p \"${PROJECT_DIR}/iOS/PackageVersion.plist\" \"${PROJECT_DIR}/iOS/Package\" \"${PROJECT_DIR}/iOS/CydiaPackages\"\n";
+			shellScript = "if [ \"${SIMULATOR_BUILD}\" = \"1\" ]; then\n    exit 0\nfi\n\necho \"Copying application into Package\"\n\nif [ \"${ROOTLESS_PACKAGE}\" = \"1\" ]; then\n    package_dir=\"${PROJECT_DIR}/iOS/RootlessPackage\"\n    applications_dir=\"${package_dir}/var/jb/Applications\"\nelse\n    package_dir=\"${PROJECT_DIR}/iOS/Package\"\n    applications_dir=\"${package_dir}/Applications\"\nfi\n\nmkdir -p \"${applications_dir}\"\nrm -rf \"${applications_dir}/${CONTENTS_FOLDER_PATH}\"\n\nbuiltpath=\"${BUILD_DIR}/${CONFIGURATION}${EFFECTIVE_PLATFORM_NAME}/${CONTENTS_FOLDER_PATH}\"\ncp -R \"${builtpath}\" \"${applications_dir}/\"\n\nif [ \"${ROOTLESS_PACKAGE}\" = \"1\" ]; then\n    if [ ! -d \"${ROOTLESS_RESOURCE_APP}/Base.lproj/Main.storyboardc\" ] || [ ! -f \"${ROOTLESS_RESOURCE_APP}/Assets.car\" ]; then\n        echo \"Missing verified upstream compiled UI resources at ${ROOTLESS_RESOURCE_APP}\" >&2\n        exit 1\n    fi\n    /usr/bin/ditto \"${ROOTLESS_RESOURCE_APP}/Base.lproj\" \"${applications_dir}/${CONTENTS_FOLDER_PATH}/Base.lproj\"\n    cp \"${ROOTLESS_RESOURCE_APP}/Assets.car\" \"${applications_dir}/${CONTENTS_FOLDER_PATH}/Assets.car\"\n    if [ -f \"${ROOTLESS_RESOURCE_APP}/GoogleService-Info.plist\" ]; then\n        cp \"${ROOTLESS_RESOURCE_APP}/GoogleService-Info.plist\" \"${applications_dir}/${CONTENTS_FOLDER_PATH}/GoogleService-Info.plist\"\n    fi\n    for icon_file in \"${ROOTLESS_RESOURCE_APP}\"/AppIcon*.png; do\n        [ -f \"${icon_file}\" ] || continue\n        cp \"${icon_file}\" \"${applications_dir}/${CONTENTS_FOLDER_PATH}/\"\n    done\nfi\n\n# Sign with entitlements\n${PROJECT_DIR}/bin/ldid2 -S\"${PROJECT_DIR}/Shared/entitlements.xml\" \"${applications_dir}/${EXECUTABLE_PATH}\"\n\n# Do the same for the sharing extension\n${PROJECT_DIR}/bin/ldid2 -S\"${PROJECT_DIR}/Shared/entitlements.xml\" \"${applications_dir}/${CONTENTS_FOLDER_PATH}/PlugIns/Share.appex/Share\"\n\n# Build package. dm.pl records root:wheel ownership without requiring host root.\nif [ \"${ROOTLESS_PACKAGE}\" = \"1\" ]; then\n    mkdir -p \"${PROJECT_DIR}/iOS/CydiaPackages\"\n    chmod 0755 \"${package_dir}/DEBIAN/postinst\" \"${package_dir}/DEBIAN/prerm\"\n    /usr/bin/perl \"${THEOS}/vendor/dm.pl/dm.pl\" -Zgzip \"${package_dir}\" \"${PROJECT_DIR}/iOS/CydiaPackages\"\nelse\n    ${PROJECT_DIR}/bin/iosod build -p \"${PROJECT_DIR}/iOS/PackageVersion.plist\" \"${package_dir}\" \"${PROJECT_DIR}/iOS/CydiaPackages\"\nfi\n";
 		};
 		C996746A20EE32D500EEFBD2 /* Move daemon binary into Package */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -1976,7 +1981,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "echo \"Copying daemon into Package\"\nbuiltpath=\"${BUILD_DIR}/${CONFIGURATION}${EFFECTIVE_PLATFORM_NAME}/reprovisiond\"\n\ncp -R $builtpath \"${PROJECT_DIR}/iOS/Package/usr/libexec\"\n\n# We now need to sign the daemon with appropriate entitlements via ldid2\necho \"Signing with entitlements.plist...\"\n${PROJECT_DIR}/bin/ldid2 -S\"${PROJECT_DIR}/Shared/Daemon/entitlements.plist\" \"${PROJECT_DIR}/iOS/Package/usr/libexec/reprovisiond\"\n";
+			shellScript = "if [ \"${SIMULATOR_BUILD}\" = \"1\" ]; then\n    exit 0\nfi\n\necho \"Copying daemon into Package\"\nbuiltpath=\"${BUILD_DIR}/${CONFIGURATION}${EFFECTIVE_PLATFORM_NAME}/reprovisiond\"\n\nif [ \"${ROOTLESS_PACKAGE}\" = \"1\" ]; then\n    daemon_dir=\"${PROJECT_DIR}/iOS/RootlessPackage/var/jb/usr/libexec\"\nelse\n    daemon_dir=\"${PROJECT_DIR}/iOS/Package/usr/libexec\"\nfi\n\nmkdir -p \"${daemon_dir}\"\ncp -R \"${builtpath}\" \"${daemon_dir}/reprovisiond\"\n\n# We now need to sign the daemon with appropriate entitlements via ldid2\necho \"Signing with entitlements.plist...\"\n${PROJECT_DIR}/bin/ldid2 -S\"${PROJECT_DIR}/Shared/Daemon/entitlements.plist\" \"${daemon_dir}/reprovisiond\"\n";
 		};
 		C9C5922621207C7900DF2E19 /* Copy daemon */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -2024,7 +2029,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "\"${PODS_ROOT}/FirebaseCrashlytics/run\"\n";
+			shellScript = "if [ \"${ROOTLESS_PACKAGE}\" = \"1\" ] || [ \"${SIMULATOR_BUILD}\" = \"1\" ]; then\n    exit 0\nfi\n\"${PODS_ROOT}/FirebaseCrashlytics/run\"\n";
 		};
 		CF9E59E8270D016900757D3B /* Change the version */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -2043,7 +2048,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "MAJOR_VERSION=`(/usr/libexec/PlistBuddy -c \"Print :Major\" \"${PROJECT_DIR}/iOS/PackageVersion.plist\")`\nMINOR_VERSION=`(/usr/libexec/PlistBuddy -c \"Print :Minor\" \"${PROJECT_DIR}/iOS/PackageVersion.plist\")`\nBUGFIX_VERSION=`(/usr/libexec/PlistBuddy -c \"Print :BugFix\" \"${PROJECT_DIR}/iOS/PackageVersion.plist\")`\n\nexport MARKETING_VERSION=`(printf \"%d.%d.%d\" ${MAJOR_VERSION} ${MINOR_VERSION} ${BUGFIX_VERSION})`\nexport VERSION_SUFFIX=`(/usr/libexec/PlistBuddy -c \"Print :Stage\" \"${PROJECT_DIR}/iOS/PackageVersion.plist\")`\n\n/usr/libexec/PlistBuddy -c \"Set :CFBundleShortVersionString ${MARKETING_VERSION}${VERSION_SUFFIX}\" \"${TEMP_DIR}/Preprocessed-Info.plist\"\n";
+			shellScript = "if [ \"${ROOTLESS_PACKAGE}\" = \"1\" ] || [ \"${SIMULATOR_BUILD}\" = \"1\" ]; then\n    version_plist=\"${PROJECT_DIR}/iOS/RootlessPackageVersion.plist\"\nelse\n    version_plist=\"${PROJECT_DIR}/iOS/PackageVersion.plist\"\nfi\n\nMAJOR_VERSION=`(/usr/libexec/PlistBuddy -c \"Print :Major\" \"${version_plist}\")`\nMINOR_VERSION=`(/usr/libexec/PlistBuddy -c \"Print :Minor\" \"${version_plist}\")`\nBUGFIX_VERSION=`(/usr/libexec/PlistBuddy -c \"Print :BugFix\" \"${version_plist}\")`\n\nexport MARKETING_VERSION=`(printf \"%d.%d.%d\" ${MAJOR_VERSION} ${MINOR_VERSION} ${BUGFIX_VERSION})`\nexport VERSION_SUFFIX=`(/usr/libexec/PlistBuddy -c \"Print :Stage\" \"${version_plist}\")`\n\n/usr/libexec/PlistBuddy -c \"Set :CFBundleShortVersionString ${MARKETING_VERSION}${VERSION_SUFFIX}\" \"${TEMP_DIR}/Preprocessed-Info.plist\"\n";
 		};
 		D9E090A35B56AD801CFE7261 /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -2176,6 +2181,7 @@
 				C9C6EB1F2004280A00211FDD /* aes_ni.c in Sources */,
 				C9C6EB112004280A00211FDD /* Node.cpp in Sources */,
 				C99722A5237A145F009822FC /* RPVAuthentication.m in Sources */,
+				D0A000032026082600000003 /* RPVRemoteAnisetteProvider.m in Sources */,
 				C9C6EB072004280A00211FDD /* Dictionary.cpp in Sources */,
 				C9E9BB7720C5D12500EE27D9 /* RPVSplitViewDetailViewController.m in Sources */,
 				C9C6EB0F2004280A00211FDD /* node_iterator.c in Sources */,

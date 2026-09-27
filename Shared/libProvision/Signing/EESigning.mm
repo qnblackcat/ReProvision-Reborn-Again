@@ -113,7 +113,10 @@ static auto dummy([](double) {});
     // We can now sign!
 
     ldid::DiskFolder folder([[absolutePath copy] cStringUsingEncoding:NSUTF8StringEncoding]);
-    ldid::Bundle outputBundle = Sign("", folder, _PKCS12, requirementsString, ldid::fun([&](const std::string &, const std::string &) -> std::string { return entitlementsString; }), ldid::fun([&](const std::string &) {}), ldid::fun(dummy));
+    ldid::Bundle outputBundle = Sign("", folder, _PKCS12, requirementsString, ldid::fun([&](const std::string &relativeBundlePath, const std::string &existingEntitlements) -> std::string {
+        // Preserve entitlements already assigned to nested targets.
+        return relativeBundlePath.empty() ? entitlementsString : existingEntitlements;
+    }), ldid::fun([&](const std::string &) {}), ldid::fun(dummy));
 
     // TODO: Handle errors!
 

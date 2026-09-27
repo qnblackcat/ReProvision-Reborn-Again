@@ -10,9 +10,57 @@
 #import "AuthKit.h"
 #import "NSData+GZIP.h"
 #import "RPVAuthentication.h"
+#include <string.h>
 
 NSString *const REClientID = @"XABBG36SBA";
 NSString *const REProtocolVersion = @"QH65B2";
+
+static BOOL RPVDeveloperServicesRequestCanRetry(NSURL *URL, NSString *method) {
+    if ([[method uppercaseString] isEqualToString:@"GET"]) {
+        return YES;
+    }
+
+    NSString *action = URL.lastPathComponent;
+    static NSSet<NSString *> *safeActions = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        safeActions = [NSSet setWithArray:@[
+            @"viewDeveloper.action",
+            @"listTeams.action",
+            @"listDevices.action",
+            @"listAppIds.action",
+            @"listApplicationGroups.action",
+            @"listProvisioningProfiles.action"
+        ]];
+    });
+    return [safeActions containsObject:action];
+}
+
+static NSString *RPVDeveloperServicesPayloadKind(NSData *data) {
+    if (data.length == 0) {
+        return @"empty data";
+    }
+
+    NSUInteger prefixLength = MIN(data.length, (NSUInteger)64);
+    NSString *prefix = [[NSString alloc] initWithData:[data subdataWithRange:NSMakeRange(0, prefixLength)]
+                                             encoding:NSUTF8StringEncoding];
+    NSString *normalized = [[prefix ?: @"" stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    if ([normalized hasPrefix:@"<!doctype html"] || [normalized hasPrefix:@"<html"]) {
+        return @"HTML data";
+    }
+    if ([normalized hasPrefix:@"<?xml"] || [normalized hasPrefix:@"<plist"] ||
+        (data.length >= 6 && !memcmp(data.bytes, "bplist", 6))) {
+        return @"property-list data";
+    }
+    if ([normalized hasPrefix:@"{"] || [normalized hasPrefix:@"["]) {
+        return @"JSON data";
+    }
+    if ([data isGzippedData]) {
+        return @"compressed data";
+    }
+    return @"unknown data";
+}
 
 
 @interface EEAppleServices ()
@@ -54,61 +102,148 @@ NSString *const REProtocolVersion = @"QH65B2";
 // Private methods.
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-- (NSMutableURLRequest *)populateHeaders:(NSMutableURLRequest *)request method:(NSString *)method {
-    NSDictionary<NSString *, NSString *> *appleHeaders = [self.authentication appleIDHeadersForRequest:request];
+- (NSMutableURLRequest *)populateHeaders:(NSMutableURLRequest *)request method:(NSString *)method credentials:(NSURLCredential *)credentials {
     AKDevice *currentDevice = [AKDevice currentDevice];
-    NSDictionary<NSString *, NSString *> *httpHeaders = @{
+    NSMutableDictionary<NSString *, NSString *> *httpHeaders = [@{
         @"Content-Type": [method isEqualToString:@"POST"] ? @"text/x-xml-plist" : @"application/vnd.api+json",
         @"User-Agent": @"Xcode",
         @"Accept": [method isEqualToString:@"POST"] ? @"text/x-xml-plist" : @"application/vnd.api+json",
         @"Accept-Language": @"en-us",
         @"Connection": @"keep-alive",
-        @"X-Xcode-Version": @"11.2 (11B52)",
-        @"X-Apple-I-Identity-Id": [[self.credentials user] componentsSeparatedByString:@"|"][0] ?: @"",
-        @"X-Apple-GS-Token": [self.credentials password] ?: @"",
+        @"X-Xcode-Version": @"14.2 (14C18)",
+        @"X-Apple-I-Identity-Id": [[credentials user] componentsSeparatedByString:@"|"].firstObject ?: @"",
+        @"X-Apple-GS-Token": [credentials password] ?: @"",
         @"X-Mme-Device-Id": [currentDevice uniqueDeviceIdentifier] ?: @"",
-        @"X-HTTP-Method-Override": method,
-    };
+    } mutableCopy];
+
+    // QH65B2 actions are native POST requests and do not need a method override.
+    if (![method isEqualToString:@"POST"]) {
+        httpHeaders[@"X-HTTP-Method-Override"] = method;
+    }
 
     [httpHeaders enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, BOOL *stop) {
         [request setValue:value forHTTPHeaderField:key];
     }];
 
+    // Generate anisette values after the request body and static headers are ready.
+    NSDictionary<NSString *, NSString *> *appleHeaders = [self.authentication appleIDHeadersForRequest:request];
     [appleHeaders enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, BOOL *stop) {
         [request setValue:value forHTTPHeaderField:key];
     }];
 
-    [request.allHTTPHeaderFields enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, BOOL *stop) {
-        NSLog(@"%@: %@", key, value);
-    }];
+    // QH65B2 expects both locale header spellings.
+    NSString *appleLocale = appleHeaders[@"X-Apple-I-Locale"];
+    if (appleLocale.length > 0) {
+        [request setValue:appleLocale forHTTPHeaderField:@"X-Apple-Locale"];
+    }
 
     return request;
 }
 
-- (void)_sendRequest:(NSMutableURLRequest *)request method:(NSString *)method data:(NSData *)data andCompletionHandler:(void (^)(NSError *, NSDictionary *))completionHandler {
+- (void)_sendRequest:(NSMutableURLRequest *)request
+              method:(NSString *)method
+                data:(NSData *)requestData
+         credentials:(NSURLCredential *)credentials
+    retriesRemaining:(NSUInteger)retriesRemaining
+andCompletionHandler:(void (^)(NSError *, NSDictionary *))completionHandler {
     request.HTTPMethod = @"POST";
-    request = [self populateHeaders:request method:method];
-
-    [request setHTTPBody:data];
-
-    NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:sessionConfig delegate:nil delegateQueue:nil];
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (error || !data) {
-            completionHandler(error, nil);
-        } else {
-            NSData *unpacked = [data isGzippedData] ? [data gunzippedData] : data;
-            NSDictionary *plist = [method isEqualToString:@"POST"] ? [NSPropertyListSerialization propertyListWithData:unpacked options:NSPropertyListImmutable format:nil error:nil] : [NSJSONSerialization JSONObjectWithData:unpacked options:0 error:nil];
-            ;
-
-            if (!plist)
-                completionHandler(error, nil);
-            else
-                // Hit the completion handler.
-                completionHandler(nil, plist);
+    [request setHTTPBody:requestData];
+    [self.authentication prepareAnisetteWithCompletion:^(NSError *anisetteError) {
+        if (anisetteError) {
+            completionHandler(anisetteError, nil);
+            return;
         }
+
+        // Snapshot credentials before asynchronous anisette loading.
+        [self populateHeaders:request method:method credentials:credentials];
+
+        NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        sessionConfig.waitsForConnectivity = YES;
+        sessionConfig.timeoutIntervalForRequest = 20.0;
+        sessionConfig.timeoutIntervalForResource = 45.0;
+        NSURLSession *session = [NSURLSession sessionWithConfiguration:sessionConfig delegate:nil delegateQueue:nil];
+        NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *responseData, NSURLResponse *response, NSError *error) {
+            if (error || !responseData) {
+                NSError *requestError = error ?: [NSError errorWithDomain:NSURLErrorDomain
+                                                                      code:NSURLErrorBadServerResponse
+                                                                  userInfo:@{NSLocalizedDescriptionKey: @"Apple returned an empty Developer Services response."}];
+                completionHandler(requestError, nil);
+            } else {
+                NSData *unpacked = [responseData isGzippedData] ? [responseData gunzippedData] : responseData;
+                NSError *parseError = nil;
+                id responseObject = [method isEqualToString:@"POST"]
+                    ? [NSPropertyListSerialization propertyListWithData:unpacked options:NSPropertyListImmutable format:nil error:&parseError]
+                    : [NSJSONSerialization JSONObjectWithData:unpacked options:0 error:&parseError];
+
+                // Preserve structured JSON errors returned by legacy actions.
+                if (![responseObject isKindOfClass:[NSDictionary class]] && [method isEqualToString:@"POST"]) {
+                    NSError *JSONError = nil;
+                    id JSONObject = [NSJSONSerialization JSONObjectWithData:unpacked options:0 error:&JSONError];
+                    if ([JSONObject isKindOfClass:[NSDictionary class]]) {
+                        responseObject = JSONObject;
+                        parseError = nil;
+                    }
+                }
+                NSDictionary *plist = [responseObject isKindOfClass:[NSDictionary class]] ? responseObject : nil;
+
+                if (!plist) {
+                    NSHTTPURLResponse *HTTPResponse = [response isKindOfClass:[NSHTTPURLResponse class]]
+                        ? (NSHTTPURLResponse *)response
+                        : nil;
+                    NSString *payloadKind = RPVDeveloperServicesPayloadKind(unpacked ?: responseData);
+                    NSString *action = request.URL.lastPathComponent ?: @"Developer Services request";
+
+                    // Retry idempotent reads after transient HTML responses with fresh anisette.
+                    if (retriesRemaining > 0 &&
+                        RPVDeveloperServicesRequestCanRetry(request.URL, method)) {
+                        NSLog(@"Developer Services returned unreadable %@ for %@ (HTTP %ld); retrying safe request",
+                              payloadKind, action, (long)HTTPResponse.statusCode);
+                        [session finishTasksAndInvalidate];
+                        NSTimeInterval delay = retriesRemaining == 2 ? 0.75 : 1.5;
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                                       dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                            [self _sendRequest:request
+                                        method:method
+                                          data:requestData
+                                   credentials:credentials
+                              retriesRemaining:retriesRemaining - 1
+                          andCompletionHandler:completionHandler];
+                        });
+                        return;
+                    }
+
+                    NSString *responseDetails = HTTPResponse
+                        ? [NSString stringWithFormat:@"HTTP %ld, %@", (long)HTTPResponse.statusCode,
+                                                     HTTPResponse.MIMEType ?: payloadKind]
+                        : payloadKind;
+                    NSMutableDictionary *userInfo = [@{
+                        NSLocalizedDescriptionKey: [NSString stringWithFormat:
+                            @"Apple returned an unreadable Developer Services response for %@ (%@).",
+                            action, responseDetails]
+                    } mutableCopy];
+                    if (parseError) {
+                        userInfo[NSUnderlyingErrorKey] = parseError;
+                    }
+                    completionHandler([NSError errorWithDomain:NSURLErrorDomain
+                                                          code:NSURLErrorCannotParseResponse
+                                                      userInfo:userInfo], nil);
+                } else {
+                    // Hit the completion handler.
+                    completionHandler(nil, plist);
+                }
+            }
+        }];
+        [task resume];
     }];
-    [task resume];
+}
+
+- (void)_sendRequest:(NSMutableURLRequest *)request method:(NSString *)method data:(NSData *)data andCompletionHandler:(void (^)(NSError *, NSDictionary *))completionHandler {
+    [self _sendRequest:request
+                method:method
+                  data:data
+           credentials:self.credentials
+      retriesRemaining:2
+  andCompletionHandler:completionHandler];
 }
 
 - (void)_sendRawServiceRequestWithName:(NSString *)name method:(NSString *)method systemType:(EESystemType)systemType extraDictionary:(NSDictionary *)extra andCompletionHandler:(void (^)(NSError *, NSDictionary *))completionHandler {
@@ -122,7 +257,9 @@ NSString *const REProtocolVersion = @"QH65B2";
     NSError *serializationError = nil;
     NSData *data = [NSJSONSerialization dataWithJSONObject:extra options:0 error:&serializationError];
     if (data == nil) {
-        completionHandler(nil, nil);
+        completionHandler(serializationError ?: [NSError errorWithDomain:NSCocoaErrorDomain
+                                                                     code:NSPropertyListWriteInvalidError
+                                                                 userInfo:@{NSLocalizedDescriptionKey: @"The Developer Services request could not be created."}], nil);
         return;
     }
 
@@ -145,6 +282,11 @@ NSString *const REProtocolVersion = @"QH65B2";
 }
 
 - (void)_doActionWithName:(NSString *)action systemType:(EESystemType)systemType extraDictionary:(NSDictionary *)extra andCompletionHandler:(void (^)(NSError *, NSDictionary *))completionHandler {
+    [self _doActionWithName:action systemType:systemType extraDictionary:extra
+               credentials:self.credentials andCompletionHandler:completionHandler];
+}
+
+- (void)_doActionWithName:(NSString *)action systemType:(EESystemType)systemType extraDictionary:(NSDictionary *)extra credentials:(NSURLCredential *)credentials andCompletionHandler:(void (^)(NSError *, NSDictionary *))completionHandler {
     NSString *os = @"";
 
     if (systemType != EESystemTypeUndefined)
@@ -201,7 +343,8 @@ NSString *const REProtocolVersion = @"QH65B2";
     // We want this as an XML plist.
     NSData *data = [NSPropertyListSerialization dataWithPropertyList:dict format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
 
-    [self _sendRequest:request method:method data:data andCompletionHandler:completionHandler];
+    [self _sendRequest:request method:method data:data credentials:credentials
+      retriesRemaining:2 andCompletionHandler:completionHandler];
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -249,32 +392,23 @@ NSString *const REProtocolVersion = @"QH65B2";
             return;
         }
 
-        self.credentials = [[NSURLCredential alloc] initWithUser:userIdentity password:gsToken persistence:NSURLCredentialPersistencePermanent];
+        NSURLCredential *loginCredentials = [[NSURLCredential alloc] initWithUser:userIdentity password:gsToken persistence:NSURLCredentialPersistencePermanent];
+        self.credentials = loginCredentials;
 
-        // Do a request to listTeams.action to check that the user is a member of a team
-        [self listTeamsWithCompletionHandler:^(NSError *error, NSDictionary *plist) {
-            NSArray *teams = [plist objectForKey:@"teams"];
-
-            if (!teams) {
-                // Error of some kind?
-                // TODO: HANDLE ME
-
-                completionHandler(error, plist, nil);
-                return;
-            }
-
-            NSMutableDictionary *resultDictionary = [NSMutableDictionary dictionary];
-
-            [resultDictionary setObject:@"" forKey:@"userString"];
-            [resultDictionary setObject:@"authenticated" forKey:@"reason"];
-
-            completionHandler(nil, resultDictionary, self.credentials);
-        }];
+        // RPVAccountChecker owns team discovery and its retry policy.
+        NSMutableDictionary *resultDictionary = [NSMutableDictionary dictionary];
+        [resultDictionary setObject:@"" forKey:@"userString"];
+        [resultDictionary setObject:@"authenticated" forKey:@"reason"];
+        completionHandler(nil, resultDictionary, loginCredentials);
     }];
 }
 
 - (void)requestTwoFactorLoginCodeWithCompletionHandler:(void (^)(NSError *))completion {
     [self.authentication requestLoginCodeWithCompletion:completion];
+}
+
+- (BOOL)hasActiveTwoFactorSession {
+    return [self.authentication hasActiveTwoFactorSession];
 }
 
 - (void)validateLoginCode:(NSString *)code andCompletionHandler:(void (^)(NSError *, NSDictionary *, NSURLCredential *))completionHandler {
@@ -300,27 +434,14 @@ NSString *const REProtocolVersion = @"QH65B2";
             return;
         }
 
-        self.credentials = [[NSURLCredential alloc] initWithUser:userIdentity password:gsToken persistence:NSURLCredentialPersistencePermanent];
+        NSURLCredential *loginCredentials = [[NSURLCredential alloc] initWithUser:userIdentity password:gsToken persistence:NSURLCredentialPersistencePermanent];
+        self.credentials = loginCredentials;
 
-        // Do a request to listTeams.action to check that the user is a member of a team
-        [self listTeamsWithCompletionHandler:^(NSError *error, NSDictionary *plist) {
-            NSArray *teams = [plist objectForKey:@"teams"];
-
-            if (!teams) {
-                // Error of some kind?
-                // TODO: HANDLE ME
-
-                completionHandler(error, plist, nil);
-                return;
-            }
-
-            NSMutableDictionary *resultDictionary = [NSMutableDictionary dictionary];
-
-            [resultDictionary setObject:@"" forKey:@"userString"];
-            [resultDictionary setObject:@"authenticated" forKey:@"reason"];
-
-            completionHandler(nil, resultDictionary, self.credentials);
-        }];
+        // Avoid duplicating the team lookup performed by RPVAccountChecker.
+        NSMutableDictionary *resultDictionary = [NSMutableDictionary dictionary];
+        [resultDictionary setObject:@"" forKey:@"userString"];
+        [resultDictionary setObject:@"authenticated" forKey:@"reason"];
+        completionHandler(nil, resultDictionary, loginCredentials);
     }];
 }
 
@@ -347,27 +468,13 @@ NSString *const REProtocolVersion = @"QH65B2";
             return;
         }
 
-        self.credentials = [[NSURLCredential alloc] initWithUser:userIdentity password:gsToken persistence:NSURLCredentialPersistencePermanent];
+        NSURLCredential *loginCredentials = [[NSURLCredential alloc] initWithUser:userIdentity password:gsToken persistence:NSURLCredentialPersistencePermanent];
+        self.credentials = loginCredentials;
 
-        // Do a request to listTeams.action to check that the user is a member of a team
-        [self listTeamsWithCompletionHandler:^(NSError *error, NSDictionary *plist) {
-            NSArray *teams = [plist objectForKey:@"teams"];
-
-            if (!teams) {
-                // Error of some kind?
-                // TODO: HANDLE ME
-
-                completionHandler(error, plist, nil);
-                return;
-            }
-
-            NSMutableDictionary *resultDictionary = [NSMutableDictionary dictionary];
-
-            [resultDictionary setObject:@"" forKey:@"userString"];
-            [resultDictionary setObject:@"authenticated" forKey:@"reason"];
-
-            completionHandler(nil, resultDictionary, self.credentials);
-        }];
+        NSMutableDictionary *resultDictionary = [NSMutableDictionary dictionary];
+        [resultDictionary setObject:@"" forKey:@"userString"];
+        [resultDictionary setObject:@"authenticated" forKey:@"reason"];
+        completionHandler(nil, resultDictionary, loginCredentials);
     }];
 }
 
@@ -429,7 +536,16 @@ NSString *const REProtocolVersion = @"QH65B2";
 }
 
 - (void)listTeamsWithCompletionHandler:(void (^)(NSError *, NSDictionary *))completionHandler {
-    [self _doActionWithName:@"listTeams.action" systemType:EESystemTypeUndefined extraDictionary:nil andCompletionHandler:^(NSError *error, NSDictionary *plist) {
+    [self listTeamsWithCredentials:self.credentials completionHandler:completionHandler];
+}
+
+- (void)listTeamsWithCredentials:(NSURLCredential *)credentials completionHandler:(void (^)(NSError *, NSDictionary *))completionHandler {
+    if (credentials.user.length == 0 || credentials.password.length == 0) {
+        completionHandler([NSError errorWithDomain:@"ReProvision.Authentication" code:1
+                                         userInfo:@{NSLocalizedDescriptionKey: @"The Apple login did not return usable Developer credentials. Please sign in again."}], nil);
+        return;
+    }
+    [self _doActionWithName:@"listTeams.action" systemType:EESystemTypeUndefined extraDictionary:nil credentials:credentials andCompletionHandler:^(NSError *error, NSDictionary *plist) {
         if (error) {
             completionHandler(error, nil);
         } else {

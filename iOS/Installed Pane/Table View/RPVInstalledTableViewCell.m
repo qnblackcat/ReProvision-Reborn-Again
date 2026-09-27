@@ -126,7 +126,7 @@ static CGFloat inset = 20;
 
     if (!self.selectedBackgroundView) {
         self.selectedBackgroundView = [[UIView alloc] initWithFrame:CGRectZero];
-        self.selectedBackgroundView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.2];
+        self.selectedBackgroundView.backgroundColor = [UIColor tertiarySystemFillColor];
     }
 
     if (!self.icon) {
@@ -182,7 +182,7 @@ static CGFloat inset = 20;
         self.percentCompleteLabel.text = @"0% complete";
         self.percentCompleteLabel.font = [UIFont systemFontOfSize:IS_IPAD ? 12.5 : 11 weight:UIFontWeightMedium];
         self.percentCompleteLabel.hidden = YES;
-        self.percentCompleteLabel.textColor = [UIColor grayColor];
+        self.percentCompleteLabel.textColor = [UIColor secondaryLabelColor];
 
         // MarqueeLabel specific
         self.percentCompleteLabel.fadeLength = 8.0;
@@ -201,9 +201,9 @@ static CGFloat inset = 20;
         self.progressBar.progressCapType = kCGLineCapRound;
         self.progressBar.emptyCapType = kCGLineCapRound;
         self.progressBar.progressLineWidth = 1.0;
-        self.progressBar.progressColor = [UIColor darkGrayColor];
-        self.progressBar.progressStrokeColor = [UIColor darkGrayColor];
-        self.progressBar.emptyLineColor = [UIColor lightGrayColor];
+        self.progressBar.progressColor = self.tintColor;
+        self.progressBar.progressStrokeColor = self.tintColor;
+        self.progressBar.emptyLineColor = [UIColor separatorColor];
         self.progressBar.backgroundColor = [UIColor clearColor];
 
         self.progressBar.hidden = YES;
@@ -219,13 +219,13 @@ static CGFloat inset = 20;
     }
 
     // Reset text colours if needed
-    self.displayNameLabel.textColor = [UIColor blackColor];
+    self.displayNameLabel.textColor = [UIColor labelColor];
     self.displayNameLabel.font = [UIFont systemFontOfSize:IS_IPAD ? 20 : 16 weight:UIFontWeightBold];
     self.displayNameLabel.textAlignment = NSTextAlignmentLeft;
     self.displayNameLabel.labelize = NO;
 
-    self.bundleIdentifierLabel.textColor = [UIColor grayColor];
-    self.timeRemainingLabel.textColor = [UIColor grayColor];
+    self.bundleIdentifierLabel.textColor = [UIColor secondaryLabelColor];
+    self.timeRemainingLabel.textColor = [UIColor secondaryLabelColor];
 
     // Reset hidden states if needed
     self.icon.hidden = NO;
@@ -242,7 +242,7 @@ static CGFloat inset = 20;
     self.notificationView.clipsToBounds = YES;
 
     self.backgroundColor = [UIColor clearColor];
-    self.contentView.backgroundColor = [UIColor whiteColor];
+    self.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
 }
 
 - (void)configureWithApplication:(RPVApplication *)application fallbackDisplayName:(NSString *)fallback andExpiryDate:(NSDate *)date {
@@ -253,7 +253,7 @@ static CGFloat inset = 20;
         self.bundleIdentifier = @"";
 
         // No application to display
-        self.displayNameLabel.textColor = [UIColor darkGrayColor];
+        self.displayNameLabel.textColor = [UIColor secondaryLabelColor];
         self.displayNameLabel.font = [UIFont systemFontOfSize:IS_IPAD ? 20 : 16 weight:UIFontWeightRegular];
         self.displayNameLabel.textAlignment = NSTextAlignmentCenter;
         self.displayNameLabel.labelize = YES;

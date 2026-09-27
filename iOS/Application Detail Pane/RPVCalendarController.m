@@ -79,7 +79,7 @@
     
     self.dateLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.dateLabel.text = [dateFormatter stringFromDate:self.dateToDisplay];
-    self.dateLabel.textColor = [UIColor blackColor];
+    self.dateLabel.textColor = [UIColor labelColor];
     self.dateLabel.textAlignment = NSTextAlignmentCenter;
     self.dateLabel.font = [UIFont systemFontOfSize:18];
     
@@ -98,7 +98,7 @@
     
     self.timeLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.timeLabel.text = [dateFormatter stringFromDate:self.dateToDisplay];
-    self.timeLabel.textColor = [UIColor grayColor];
+    self.timeLabel.textColor = [UIColor secondaryLabelColor];
     self.timeLabel.textAlignment = NSTextAlignmentCenter;
     self.timeLabel.font = [UIFont systemFontOfSize:16];
     

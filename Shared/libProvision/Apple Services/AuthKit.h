@@ -15,6 +15,10 @@
 - (void)setServerFriendlyDescription:(NSString*)arg1;
 @end
 
+@interface AKAnisetteProvisioningController : NSObject
+- (id)anisetteDataWithError:(NSError **)error;
+@end
+
 @interface AKAppleIDAuthenticationContext : NSObject
 @property (copy) NSString *username;
 
@@ -84,8 +88,8 @@
 @end
 
 @interface AKAppleIDSession : NSObject
-- (id)_pairedDeviceAnisetteController;
-- (id)_nativeAnisetteController;
+- (AKAnisetteProvisioningController *)_pairedDeviceAnisetteController;
+- (AKAnisetteProvisioningController *)_nativeAnisetteController;
 - (void)_handleURLResponse:(id)arg1 forRequest:(id)arg2 withCompletion:(id)arg3;
 - (void)_generateAppleIDHeadersForSessionTask:(id)arg1 withCompletion:(id)arg2;
 - (id)_generateAppleIDHeadersForRequest:(id)arg1 error:(id *)arg2;
@@ -100,5 +104,10 @@
 - (id)initWithIdentifier:(id)arg1;
 - (id)init;
 
+@end
+
+
+@interface NSMutableURLRequest (AuthKit)
++ (NSDictionary *)ak_anisetteHeadersWithData:(id)data;
 @end
 #endif /* AuthKit_h */

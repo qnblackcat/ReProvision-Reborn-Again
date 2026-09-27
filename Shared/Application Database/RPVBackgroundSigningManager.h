@@ -13,6 +13,7 @@
 
 + (instancetype)sharedInstance;
 - (void)attemptBackgroundSigningIfNecessary:(void (^)(void))completionHandler;
+- (void)attemptBackgroundSigningIfNecessaryWithCompletion:(void (^)(NSError *error))completionHandler;
 
 /**
  Checks if any applications need re-signing for the saved threshold.

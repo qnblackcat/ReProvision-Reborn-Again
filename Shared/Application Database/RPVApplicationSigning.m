@@ -12,6 +12,7 @@
 #import "RPVApplicationDatabase.h"
 
 #import "SSZipArchive.h"
+#import <dlfcn.h>
 
 /* Private headers */
 @interface LSApplicationWorkspace : NSObject
@@ -19,6 +20,22 @@
 - (BOOL)installApplication:(NSURL *)arg1 withOptions:(NSDictionary *)arg2 error:(NSError **)arg3;
 - (NSArray *)allApplications;
 - (BOOL)uninstallApplication:(id)arg1 withOptions:(id)arg2;
+@end
+
+// Load the iOS 26 installation API dynamically to preserve older-system support.
+@protocol RPVMIInstallOptions <NSObject>
+- (void)setInstallTargetType:(NSUInteger)installTargetType;
+- (void)setAllowLocalProvisioned:(BOOL)allowLocalProvisioned;
+- (void)setDeveloperInstall:(BOOL)developerInstall;
+- (void)setUserInitiated:(BOOL)userInitiated;
+- (void)setBundleIdentifier:(NSString *)bundleIdentifier;
+@end
+
+@interface NSObject (RPVInstallCoordination)
++ (void)installApplication:(NSURL *)applicationURL
+                   options:(id<RPVMIInstallOptions>)options
+                completion:(void (^)(id identity, NSError *error))completion;
++ (BOOL)uninstallAppWithBundleID:(NSString *)bundleIdentifier error:(NSError **)error;
 @end
 
 
@@ -51,7 +68,6 @@ static RPVApplicationSigning *sharedInstance;
 
     if (self) {
         self.observers = [NSMutableArray array];
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_appShouldBeRemoved:) name:@"jp.soh.reprovision/appShouldBeRemoved" object:nil];
     }
 
     return self;
@@ -173,28 +189,46 @@ static RPVApplicationSigning *sharedInstance;
  @return Success
  */
 - (BOOL)_copyApplicationBundleForApplication:(RPVApplication *)application extractedArchiveURL:(NSURL **)extractedArchiveURL applicationBundleURL:(NSURL **)applicationBundleURL error:(NSError **)error {
-    NSString *temporaryDirectory = [EEBackend applicationTemporaryDirectory];
-    NSString *dotAppName = @"";
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSString *operationDirectory = [[EEBackend applicationTemporaryDirectory] stringByAppendingPathComponent:
+                                    [NSString stringWithFormat:@"reprovision-staging-%@", [[NSUUID UUID] UUIDString]]];
+    NSString *payloadDirectory = [operationDirectory stringByAppendingPathComponent:@"Payload"];
+    NSString *dotAppName = nil;
+    NSError *filesystemError = nil;
+
+    if (![fileManager createDirectoryAtPath:operationDirectory
+                withIntermediateDirectories:YES
+                                 attributes:nil
+                                      error:&filesystemError]) {
+        if (error) {
+            NSString *description = filesystemError.localizedDescription ?: @"Failed to create a clean signing workspace.";
+            *error = [self _errorFromString:description errorCode:RPVErrorFailedToCopyBundle];
+        }
+        return NO;
+    }
 
     if ([application.class isEqual:[RPVApplication class]]) {
         NSString *applicationBundleLocation = [application locationOfApplicationOnFilesystem].path;
         dotAppName = [applicationBundleLocation lastPathComponent];
 
-        NSString *toPath = [NSString stringWithFormat:@"%@/%@/Payload/%@", temporaryDirectory, [application bundleIdentifier], dotAppName];
-
-        // Create the parent path if needed
-        NSString *parentPath = [toPath stringByDeletingLastPathComponent];
-        if (![[NSFileManager defaultManager] fileExistsAtPath:parentPath]) {
-            [[NSFileManager defaultManager] createDirectoryAtPath:parentPath withIntermediateDirectories:YES attributes:nil error:nil];
-            // Delete any existing .app if needed too.
-        } else if ([[NSFileManager defaultManager] fileExistsAtPath:toPath]) {
-            [[NSFileManager defaultManager] removeItemAtPath:toPath error:nil];
+        if (![fileManager createDirectoryAtPath:payloadDirectory
+                    withIntermediateDirectories:YES
+                                     attributes:nil
+                                          error:&filesystemError]) {
+            [fileManager removeItemAtPath:operationDirectory error:nil];
+            if (error) {
+                NSString *description = filesystemError.localizedDescription ?: @"Failed to create the IPA Payload directory.";
+                *error = [self _errorFromString:description errorCode:RPVErrorFailedToCopyBundle];
+            }
+            return NO;
         }
 
-        NSError *err;
-        if (![[NSFileManager defaultManager] copyItemAtPath:applicationBundleLocation toPath:toPath error:&err]) {
+        NSString *destinationPath = [payloadDirectory stringByAppendingPathComponent:dotAppName];
+        if (![fileManager copyItemAtPath:applicationBundleLocation toPath:destinationPath error:&filesystemError]) {
+            [fileManager removeItemAtPath:operationDirectory error:nil];
             if (error) {
-                *error = [self _errorFromString:err.localizedDescription errorCode:RPVErrorFailedToCopyBundle];
+                NSString *description = filesystemError.localizedDescription ?: @"Failed to copy the application bundle.";
+                *error = [self _errorFromString:description errorCode:RPVErrorFailedToCopyBundle];
             }
             return NO;
         }
@@ -203,44 +237,71 @@ static RPVApplicationSigning *sharedInstance;
         // This is an IPA application, therefore -locationOfApplicationOnFilesystem will return the .ipa
         // file on the filesystem.
 
-        // We need to extract the IPA to our temporary location, and roll from there.
-        NSString *extractionPath = [NSString stringWithFormat:@"%@/%@", temporaryDirectory, [application bundleIdentifier]];
-        NSError *err;
+        // Use a clean extraction directory for each operation.
         BOOL success = [SSZipArchive unzipFileAtPath:[application locationOfApplicationOnFilesystem].path
-                                       toDestination:extractionPath
+                                       toDestination:operationDirectory
                                            overwrite:YES
                                             password:nil
-                                               error:&err];
+                                               error:&filesystemError];
 
-        if (success) {
-            // Find the .app name
-
-            NSArray *subdirs = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:[NSString stringWithFormat:@"%@/Payload/", extractionPath] error:nil];
-
-            for (NSString *dir in subdirs) {
-                if (![dir isEqualToString:@".DS_Store"]) {
-                    dotAppName = dir;
-                    break;
-                }
-            }
-
-            // Clear the downloaded IPA now that it is extracted properly.
-            NSError *cacheClearError;
-            [[NSFileManager defaultManager] removeItemAtPath:[application locationOfApplicationOnFilesystem].path error:&cacheClearError];
-
-            if (cacheClearError) {
-                NSLog(@"Failed to remove '%@'", [application locationOfApplicationOnFilesystem].path);
-            }
-        } else {
+        if (!success) {
+            [fileManager removeItemAtPath:operationDirectory error:nil];
             if (error) {
-                *error = [self _errorFromString:err.localizedDescription errorCode:RPVErrorFailedToCopyBundle];
+                NSString *description = filesystemError.localizedDescription ?: @"Failed to unpack the IPA.";
+                *error = [self _errorFromString:description errorCode:RPVErrorFailedToCopyBundle];
             }
             return NO;
         }
     }
 
-    *extractedArchiveURL = [NSURL fileURLWithPath:[NSString stringWithFormat:@"%@/%@", temporaryDirectory, [application bundleIdentifier]]];
-    *applicationBundleURL = [NSURL fileURLWithPath:[NSString stringWithFormat:@"%@/%@/Payload/%@", temporaryDirectory, [application bundleIdentifier], dotAppName]];
+    NSArray *payloadContents = [fileManager contentsOfDirectoryAtPath:payloadDirectory error:&filesystemError];
+    if (!payloadContents) {
+        [fileManager removeItemAtPath:operationDirectory error:nil];
+        if (error) {
+            NSString *description = filesystemError.localizedDescription ?: @"The IPA does not contain a readable Payload directory.";
+            *error = [self _errorFromString:description errorCode:RPVErrorFailedToCopyBundle];
+        }
+        return NO;
+    }
+
+    NSMutableArray *topLevelApplications = [NSMutableArray array];
+    for (NSString *entry in payloadContents) {
+        NSString *candidatePath = [payloadDirectory stringByAppendingPathComponent:entry];
+        BOOL isDirectory = NO;
+        if ([[entry pathExtension] caseInsensitiveCompare:@"app"] == NSOrderedSame &&
+            [fileManager fileExistsAtPath:candidatePath isDirectory:&isDirectory] && isDirectory) {
+            [topLevelApplications addObject:entry];
+        }
+    }
+
+    if (topLevelApplications.count != 1) {
+        NSString *description = nil;
+        if (topLevelApplications.count == 0) {
+            description = @"The IPA Payload does not contain a top-level .app bundle.";
+        } else {
+            description = [NSString stringWithFormat:
+                           @"The IPA Payload contains multiple top-level .app bundles (%@). ReProvision stopped before installation.",
+                           [topLevelApplications componentsJoinedByString:@", "]];
+        }
+        [fileManager removeItemAtPath:operationDirectory error:nil];
+        if (error) {
+            *error = [self _errorFromString:description errorCode:RPVErrorFailedToCopyBundle];
+        }
+        return NO;
+    }
+
+    dotAppName = [topLevelApplications firstObject];
+
+    if (![application.class isEqual:[RPVApplication class]]) {
+        NSError *cacheClearError = nil;
+        [fileManager removeItemAtPath:[application locationOfApplicationOnFilesystem].path error:&cacheClearError];
+        if (cacheClearError) {
+            NSLog(@"Failed to remove '%@': %@", [application locationOfApplicationOnFilesystem].path, cacheClearError);
+        }
+    }
+
+    *extractedArchiveURL = [NSURL fileURLWithPath:operationDirectory];
+    *applicationBundleURL = [NSURL fileURLWithPath:[payloadDirectory stringByAppendingPathComponent:dotAppName]];
 
     return YES;
 }
@@ -274,148 +335,201 @@ static RPVApplicationSigning *sharedInstance;
     }
 }
 
-- (void)_installIpaAtPath:(NSString *)ipaPath withBundleIdentifier:(NSString *)bundleIdentifier {
+- (void)_installIpaAtPath:(NSString *)ipaPath
+ originalBundleIdentifier:(NSString *)originalBundleIdentifier
+   signedBundleIdentifier:(NSString *)signedBundleIdentifier
+replaceOriginalAfterSuccess:(BOOL)replaceOriginalAfterSuccess
+                completion:(void (^)(NSError *error))completion {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSError *error;
-        NSDictionary *options = @{ @"CFBundleIdentifier": bundleIdentifier, @"AllowInstallLocalProvisioned": [NSNumber numberWithBool:YES] };
-
         NSURL *ipaURL = [NSURL fileURLWithPath:ipaPath];
-
-        // Make a cached version of the .ipa for if we need to handle another go-around.
-        [[NSFileManager defaultManager] copyItemAtPath:ipaPath toPath:[ipaPath stringByReplacingOccurrencesOfString:@".ipa" withString:@"2.ipa"] error:nil];
-
         NSLog(@"Does ipaPath exist? %d", [[NSFileManager defaultManager] fileExistsAtPath:ipaPath]);
 
+        void (^finishInstallation)(BOOL, NSError *) = ^(BOOL result, NSError *error) {
+            // Keep the installed copy if its replacement fails.
+            NSError *installationError = nil;
+            if (!result) {
+                NSString *description = error.localizedDescription;
+                if (description.length == 0) {
+                    description = @"The installer rejected the signed IPA without returning an error.";
+                }
+
+                NSString *errorMessage = nil;
+                if ([description localizedCaseInsensitiveContainsString:@"invalid entitlements"]) {
+                    errorMessage = [NSString stringWithFormat:
+                                    @"Incorrect entitlements for this application. ReProvision may not support a capability it needs.\n\nInstaller: %@ (%@, code %ld)",
+                                    description, error.domain ?: @"unknown domain", (long)error.code];
+                } else if ([description localizedCaseInsensitiveContainsString:@"valid provisioning profile"]) {
+                    errorMessage = [NSString stringWithFormat:
+                                    @"This application was not signed with a provisioning profile valid for this device. Try signing out and back in, then sign it again.\n\nInstaller: %@ (%@, code %ld)",
+                                    description, error.domain ?: @"unknown domain", (long)error.code];
+                } else if (error.code == 13) {
+                    errorMessage = [NSString stringWithFormat:
+                                    @"This app could not be installed because the account's active signed-app limit was reached.\n\nInstaller: %@ (%@, code %ld)",
+                                    description, error.domain ?: @"unknown domain", (long)error.code];
+                } else {
+                    errorMessage = [NSString stringWithFormat:@"%@\n\nInstaller: %@ (code %ld)",
+                                    description, error.domain ?: @"unknown domain", (long)error.code];
+                }
+
+                if (![originalBundleIdentifier isEqualToString:signedBundleIdentifier]) {
+                    errorMessage = [errorMessage stringByAppendingFormat:
+                                    @"\nOriginal bundle ID: %@\nSigned bundle ID: %@",
+                                    originalBundleIdentifier, signedBundleIdentifier];
+                }
+                installationError = [self _errorFromString:errorMessage errorCode:RPVErrorFailedToInstallSignedIPA];
+            }
+
+            if (result) {
+                for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
+                    [observer applicationSigningUpdateProgress:90 forBundleIdentifier:originalBundleIdentifier];
+                }
+
+                // Remove the old bundle ID only after the replacement succeeds.
+                if (replaceOriginalAfterSuccess &&
+                    ![originalBundleIdentifier isEqualToString:signedBundleIdentifier]) {
+                    BOOL removedOriginal = NO;
+                    NSError *removalError = nil;
+                    NSOperatingSystemVersion iOS26 = {26, 0, 0};
+                    Class coordinatorClass = NSClassFromString(@"IXAppInstallCoordinator");
+                    if ([[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:iOS26] &&
+                        [coordinatorClass respondsToSelector:@selector(uninstallAppWithBundleID:error:)]) {
+                        removedOriginal = [coordinatorClass uninstallAppWithBundleID:originalBundleIdentifier
+                                                                               error:&removalError];
+                    } else {
+                        removedOriginal = [[LSApplicationWorkspace defaultWorkspace] uninstallApplication:originalBundleIdentifier
+                                                                                                  withOptions:nil];
+                    }
+                    if (!removedOriginal) {
+                        NSLog(@"Replacement '%@' installed, but the old application '%@' could not be removed: %@",
+                              signedBundleIdentifier, originalBundleIdentifier, removalError);
+                    }
+                }
+
+                for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
+                    [observer applicationSigningUpdateProgress:100 forBundleIdentifier:originalBundleIdentifier];
+                }
+            }
+
+            // Legacy installs and early failures still require explicit cleanup.
+            [[NSFileManager defaultManager] removeItemAtPath:ipaPath error:nil];
+            if (completion) {
+                completion(installationError);
+            }
+        };
+
+        NSOperatingSystemVersion iOS26 = {26, 0, 0};
+        if ([[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:iOS26]) {
+            dlopen("/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation", RTLD_NOW);
+            dlopen("/System/Library/PrivateFrameworks/InstallCoordination.framework/InstallCoordination", RTLD_NOW);
+
+            Class optionsClass = NSClassFromString(@"MIInstallOptions");
+            Class coordinatorClass = NSClassFromString(@"IXAppInstallCoordinator");
+            if (!optionsClass ||
+                ![coordinatorClass respondsToSelector:@selector(installApplication:options:completion:)]) {
+                NSError *unsupported = [self _errorFromString:
+                                        @"The iOS 26 installation service is unavailable on this device."
+                                                          errorCode:RPVErrorFailedToInstallSignedIPA];
+                finishInstallation(NO, unsupported);
+                return;
+            }
+
+            id<RPVMIInstallOptions> options = [[optionsClass alloc] init];
+            [options setInstallTargetType:1]; // user application
+            [options setAllowLocalProvisioned:YES];
+            [options setDeveloperInstall:YES];
+            [options setUserInitiated:YES];
+            [options setBundleIdentifier:signedBundleIdentifier];
+
+            [coordinatorClass installApplication:ipaURL
+                                         options:options
+                                      completion:^(id identity, NSError *installError) {
+                finishInstallation(installError == nil, installError);
+            }];
+            return;
+        }
+
+        NSError *error = nil;
+        NSDictionary *options = @{ @"CFBundleIdentifier": signedBundleIdentifier,
+                                   @"AllowInstallLocalProvisioned": @YES };
         BOOL result = NO;
         @try {
             result = [[LSApplicationWorkspace defaultWorkspace] installApplication:ipaURL
                                                                        withOptions:options
                                                                              error:&error];
-        } @catch (NSException *e) {
-            error = [self _errorFromString:e.description errorCode:RPVErrorFailedToInstallSignedIPA];
-            result = NO;
+        } @catch (NSException *exception) {
+            NSString *description = exception.reason ?: exception.description ?: @"The installer raised an unknown exception.";
+            error = [self _errorFromString:description errorCode:RPVErrorFailedToInstallSignedIPA];
         }
-
-        if (!result) {
-            // Check if this is the case where it's an app from another Team ID.
-            if (error.code == 64 || [error.localizedDescription containsString:@"LaunchServicesError error 0"]) {
-                // Delete the original app, and try again.
-                if ([[LSApplicationWorkspace defaultWorkspace] uninstallApplication:bundleIdentifier withOptions:nil]) {
-                    // Try again!
-
-                    // Update progress to 70% for this application.
-                    for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
-                        [observer applicationSigningUpdateProgress:75 forBundleIdentifier:bundleIdentifier];
-                    }
-
-                    NSLog(@"*** Uninstalled application, trying again.");
-                    [self _installIpaAtPath:[ipaPath stringByReplacingOccurrencesOfString:@".ipa" withString:@"2.ipa"] withBundleIdentifier:bundleIdentifier];
-
-                    return;
-                }
-            }
-
-            // Give an error, but make it user-friendly.
-            NSString *errorMessage = [NSString stringWithFormat:@"%@, (code: %ld)", error.localizedDescription, (long)error.code];
-            if ([errorMessage containsString:@"invalid entitlements"]) {
-                errorMessage = @"Incorrect entitlements for this application. This is likely caused by ReProvision not supporting a capability this application needs.";
-            } else if ([errorMessage containsString:@"valid provisioning profile"]) {
-                errorMessage = @"This application hasn't been signed correctly for this device. This may occur if this device is not registered to the account used to sign with - try logging out then in again";
-            } else if (error.code == 13) {
-                errorMessage = @"This app could not be installed because there already are 3 signed apps installed. Automatic resigning needs at maximum 2 apps installed via your account.";
-            } else {
-                // Parse out the useful information from the error description
-                NSRange range = [error.localizedDescription rangeOfString:@"(" options:NSBackwardsSearch];
-
-                if (range.location != NSNotFound) {
-                    errorMessage = [error.localizedDescription substringFromIndex:range.location];
-                    errorMessage = [errorMessage substringToIndex:errorMessage.length - 2];
-                }
-            }
-
-            NSError *err = [self _errorFromString:errorMessage errorCode:RPVErrorFailedToInstallSignedIPA];
-            for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
-                [observer applicationSigningDidEncounterError:err forBundleIdentifier:bundleIdentifier];
-            }
-        }
-
-        if (result) {
-            // Update progress to 90% for this application.
-            for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
-                [observer applicationSigningUpdateProgress:90 forBundleIdentifier:bundleIdentifier];
-            }
-        }
-
-        // Clean up.
-        [[NSFileManager defaultManager] removeItemAtPath:ipaPath error:nil];
-        [[NSFileManager defaultManager] removeItemAtPath:[ipaPath stringByReplacingOccurrencesOfString:@".ipa" withString:@"2.ipa"] error:nil];
-
-        if (result) {
-            // Update progress to 100% for this application.
-            for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
-                [observer applicationSigningUpdateProgress:100 forBundleIdentifier:bundleIdentifier];
-            }
-        }
-
-        // If this was the last application, notify the completionHandler of success
-        if (!self.undertakingResignPipeline) {
-            // End the background task!
-            [[UIApplication sharedApplication] endBackgroundTask:self.currentBackgroundTaskIdentifier];
-            self.currentBackgroundTaskIdentifier = UIBackgroundTaskInvalid;
-
-            // Notify of success!
-            for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
-                [observer applicationSigningCompleteWithError:nil];
-            }
-        }
+        finishInstallation(result, error);
     });
 }
 
 - (void)_resignApplication:(RPVApplication *)application withTeamID:(NSString *)teamID username:(NSString *)username password:(NSString *)password {
+    NSString *originalBundleIdentifier = [[application bundleIdentifier] copy] ?: @"";
+    BOOL replacesInstalledApplication = [application.class isEqual:[RPVApplication class]];
+
     // Update progress to 10% for this application.
     for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
-        [observer applicationSigningUpdateProgress:10 forBundleIdentifier:[application bundleIdentifier]];
+        [observer applicationSigningUpdateProgress:10 forBundleIdentifier:originalBundleIdentifier];
     }
 
     //////////////////////////////////////////////////////////////////////////////////////
     // 1. Make a copy of this application's .app into a directory structure of an IPA.
     //////////////////////////////////////////////////////////////////////////////////////
 
-    NSURL *extractedArchiveURL;   // This root directory is repacked into an IPA.
-    NSURL *applicationBundleURL;  // Passed to EEbackend to sign (the .app).
-    NSError *error;
+    NSURL *extractedArchiveURL = nil;   // This root directory is repacked into an IPA.
+    NSURL *applicationBundleURL = nil;  // Passed to EEbackend to sign (the .app).
+    NSError *error = nil;
 
-    if (![self _copyApplicationBundleForApplication:application extractedArchiveURL:&extractedArchiveURL applicationBundleURL:&applicationBundleURL error:&error]) {
-        // Callback to say we done "goofed".
+    void (^finishCurrentApplicationWithError)(NSError *) = ^(NSError *pipelineError) {
         for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
-            [observer applicationSigningDidEncounterError:error forBundleIdentifier:[application bundleIdentifier]];
+            [observer applicationSigningDidEncounterError:pipelineError forBundleIdentifier:originalBundleIdentifier];
         }
 
-        // Start the next application off.
         if (self.installQueue.count > 1) {
             [self.installQueue removeObjectAtIndex:0];
             [self _initiateNextInstallFromQueueWithTeamID:teamID
                                                  username:username
                                                  password:password];
         } else {
-            // End the background task!
             [[UIApplication sharedApplication] endBackgroundTask:self.currentBackgroundTaskIdentifier];
             self.currentBackgroundTaskIdentifier = UIBackgroundTaskInvalid;
-
             self.undertakingResignPipeline = NO;
 
-            // Notify of failure
             for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
-                [observer applicationSigningCompleteWithError:error];
+                [observer applicationSigningCompleteWithError:pipelineError];
             }
         }
+    };
 
+    void (^finishCurrentApplicationSuccessfully)(void) = ^{
+        if (self.installQueue.count > 0) {
+            [self.installQueue removeObjectAtIndex:0];
+        }
+
+        if (self.installQueue.count > 0) {
+            [self _initiateNextInstallFromQueueWithTeamID:teamID
+                                                 username:username
+                                                 password:password];
+        } else {
+            [[UIApplication sharedApplication] endBackgroundTask:self.currentBackgroundTaskIdentifier];
+            self.currentBackgroundTaskIdentifier = UIBackgroundTaskInvalid;
+            self.undertakingResignPipeline = NO;
+
+            for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
+                [observer applicationSigningCompleteWithError:nil];
+            }
+        }
+    };
+
+    if (![self _copyApplicationBundleForApplication:application extractedArchiveURL:&extractedArchiveURL applicationBundleURL:&applicationBundleURL error:&error]) {
+        finishCurrentApplicationWithError(error);
         return;
     }
 
     // Update progress to 30% for this application.
     for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
-        [observer applicationSigningUpdateProgress:30 forBundleIdentifier:[application bundleIdentifier]];
+        [observer applicationSigningUpdateProgress:30 forBundleIdentifier:originalBundleIdentifier];
     }
 
     //////////////////////////////////////////////////////////////////////////////////////
@@ -424,101 +538,67 @@ static RPVApplicationSigning *sharedInstance;
 
     [EEBackend signBundleAtPath:[applicationBundleURL path] identity:username gsToken:password priorChosenTeamID:teamID withCompletionHandler:^(NSError *error) {
         if (error) {
-            // Callback to say we done "goofed".
-            for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
-                [observer applicationSigningDidEncounterError:error forBundleIdentifier:[application bundleIdentifier]];
-            }
+            [[NSFileManager defaultManager] removeItemAtURL:extractedArchiveURL error:nil];
+            finishCurrentApplicationWithError(error);
+            return;
+        }
 
-            // TODO: Cleanup the filesystem?
-
-            // Start the next application off.
-            if (self.installQueue.count > 1) {
-                [self.installQueue removeObjectAtIndex:0];
-                [self _initiateNextInstallFromQueueWithTeamID:teamID
-                                                     username:username
-                                                     password:password];
-            } else {
-                // End the background task!
-                [[UIApplication sharedApplication] endBackgroundTask:self.currentBackgroundTaskIdentifier];
-                self.currentBackgroundTaskIdentifier = UIBackgroundTaskInvalid;
-
-                self.undertakingResignPipeline = NO;
-
-                // Notify of failure
-                for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
-                    [observer applicationSigningCompleteWithError:error];
-                }
-            }
-
+        NSDictionary *signedInfo = [NSDictionary dictionaryWithContentsOfURL:
+                                    [applicationBundleURL URLByAppendingPathComponent:@"Info.plist"]];
+        NSString *signedBundleIdentifier = [signedInfo[@"CFBundleIdentifier"] isKindOfClass:[NSString class]]
+                                           ? signedInfo[@"CFBundleIdentifier"] : nil;
+        if (signedBundleIdentifier.length == 0) {
+            [[NSFileManager defaultManager] removeItemAtURL:extractedArchiveURL error:nil];
+            NSError *identifierError = [self _errorFromString:
+                                        @"Signing completed, but the signed app has no valid CFBundleIdentifier. Installation was stopped."
+                                                          errorCode:RPVErrorFailedToInstallSignedIPA];
+            finishCurrentApplicationWithError(identifierError);
             return;
         }
 
         // Update progress to 50% for this application.
         for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
-            [observer applicationSigningUpdateProgress:50 forBundleIdentifier:[application bundleIdentifier]];
+            [observer applicationSigningUpdateProgress:50 forBundleIdentifier:originalBundleIdentifier];
         }
 
         //////////////////////////////////////////////////////////////////////////////////////
         // 3. Build IPA
         //////////////////////////////////////////////////////////////////////////////////////
 
-        NSString *outputIpaPath = [NSString stringWithFormat:@"%@/%@.ipa", [EEBackend applicationTemporaryDirectory], [application bundleIdentifier]];
+        NSString *outputIpaPath = [[EEBackend applicationTemporaryDirectory] stringByAppendingPathComponent:
+                                   [NSString stringWithFormat:@"reprovision-signed-%@.ipa", [[NSUUID UUID] UUIDString]]];
 
-        NSError *err;
+        NSError *err = nil;
         if (![EEBackend repackIpaAtPath:[extractedArchiveURL path] toPath:outputIpaPath error:&err]) {
-            // Callback to say we done "goofed".
-            for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
-                [observer applicationSigningDidEncounterError:error forBundleIdentifier:[application bundleIdentifier]];
-            }
-
-            // TODO: Cleanup the filesystem?
-
-            // Start the next application off.
-            if (self.installQueue.count > 1) {
-                [self.installQueue removeObjectAtIndex:0];
-                [self _initiateNextInstallFromQueueWithTeamID:teamID
-                                                     username:username
-                                                     password:password];
-            } else {
-                // End the background task!
-                [[UIApplication sharedApplication] endBackgroundTask:self.currentBackgroundTaskIdentifier];
-                self.currentBackgroundTaskIdentifier = UIBackgroundTaskInvalid;
-
-                self.undertakingResignPipeline = NO;
-
-                // Notify of failure
-                for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
-                    [observer applicationSigningCompleteWithError:error];
-                }
-            }
-
+            [[NSFileManager defaultManager] removeItemAtURL:extractedArchiveURL error:nil];
+            finishCurrentApplicationWithError(err);
             return;
         }
 
+        // Remove extracted files once the IPA has been built.
+        [[NSFileManager defaultManager] removeItemAtURL:extractedArchiveURL error:nil];
+
         // Update progress to 60% for this application.
         for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
-            [observer applicationSigningUpdateProgress:60 forBundleIdentifier:[application bundleIdentifier]];
+            [observer applicationSigningUpdateProgress:60 forBundleIdentifier:originalBundleIdentifier];
         }
 
         //////////////////////////////////////////////////////////////////////////////////////
         // 4. Install IPA
         //////////////////////////////////////////////////////////////////////////////////////
 
-        NSString *bundleIdentifier = [application bundleIdentifier];
-
-        // Start the next application off at this point for some parallelism!
-        if (self.installQueue.count > 1) {
-            [self.installQueue removeObjectAtIndex:0];
-            [self _initiateNextInstallFromQueueWithTeamID:teamID
-                                                 username:username
-                                                 password:password];
-        } else {
-            // Flag that we're done!
-            self.undertakingResignPipeline = NO;
-        }
-
-        // And now we install!
-        [self _installIpaAtPath:outputIpaPath withBundleIdentifier:bundleIdentifier];
+        // Serialize installs so completion reflects the coordinator's final result.
+        [self _installIpaAtPath:outputIpaPath
+      originalBundleIdentifier:originalBundleIdentifier
+        signedBundleIdentifier:signedBundleIdentifier
+     replaceOriginalAfterSuccess:replacesInstalledApplication
+                       completion:^(NSError *installationError) {
+            if (installationError) {
+                finishCurrentApplicationWithError(installationError);
+            } else {
+                finishCurrentApplicationSuccessfully();
+            }
+        }];
     }];
 }
 
@@ -532,13 +612,6 @@ static RPVApplicationSigning *sharedInstance;
         ret = [[LSApplicationWorkspace defaultWorkspace] uninstallApplication:bundleIdentifier withOptions:nil];
     }
     return ret;
-}
-
-- (void)_appShouldBeRemoved:(NSNotification *)notification {
-    NSString *bundleIdentifier = [[notification userInfo] objectForKey:@"bundleIdentifier"];
-    if (bundleIdentifier) {
-        [[LSApplicationWorkspace defaultWorkspace] uninstallApplication:bundleIdentifier withOptions:nil];
-    }
 }
 
 @end

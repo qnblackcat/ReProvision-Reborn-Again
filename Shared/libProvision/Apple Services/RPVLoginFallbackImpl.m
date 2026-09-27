@@ -61,9 +61,8 @@
     
     // 2FA is handled internally by this implementation
     [self.authenticationController authenticateWithContext:self.currentContext completion:^(id result, id error) {
-        NSLog(@"AUTHENTICATE WITH CONTEXT: %@, %@", result, error);
-        
         if (error) {
+            NSLog(@"AuthKit authentication failed: %@", [error localizedDescription]);
             completionHandler(error, nil, nil);
             return;
         }

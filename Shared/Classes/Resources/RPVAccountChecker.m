@@ -41,21 +41,10 @@
          NSString *userString = [plist objectForKey:@"userString"];
 
          if ((!userString || [userString isEqualToString:@""]) && plist) {
-             // Get Team ID array
-             [[EEAppleServices sharedInstance] listTeamsWithCompletionHandler:^(NSError *error, NSDictionary *plist) {
-                  if (error) {
-                      completionHandler(error.localizedDescription, @"err", nil,nil);
-                      return;
-                  }
-
-                  NSArray *teams = [plist objectForKey:@"teams"];
-                  if (teams.count == 0) {
-                      completionHandler(@"Please accept the Apple Developer terms at https://developer.apple.com", resultCode, teams,nil);
-                  } else {
-                      NSString *userString = [plist objectForKey:@"userString"];
-                      completionHandler(userString, resultCode, teams, credentials);
-                  }
-              }];
+             [self _loadTeamsAfterLoginWithResultCode:resultCode
+                                           credentials:credentials
+                                      remainingRetries:2
+                                            completion:completionHandler];
          } else if (plist) {
              completionHandler(userString, resultCode, nil, credentials);
          } else {
@@ -66,6 +55,55 @@
 
 - (void)requestLoginCodeWithCompletionHandler:(void (^)(NSError *error))completion {
     [[EEAppleServices sharedInstance] requestTwoFactorLoginCodeWithCompletionHandler:completion];
+}
+
+- (BOOL)hasActiveTwoFactorSession {
+    return [[EEAppleServices sharedInstance] hasActiveTwoFactorSession];
+}
+
+- (void)_loadTeamsAfterLoginWithResultCode:(NSString *)resultCode
+                                credentials:(NSURLCredential *)credentials
+                           remainingRetries:(NSUInteger)remainingRetries
+                                 completion:(void (^)(NSString*, NSString*, NSArray*, NSURLCredential*))completionHandler {
+    [[EEAppleServices sharedInstance] listTeamsWithCredentials:credentials completionHandler:^(NSError *error, NSDictionary *plist) {
+        NSArray *teams = [plist[@"teams"] isKindOfClass:[NSArray class]] ? plist[@"teams"] : nil;
+        NSString *portalMessage = [plist[@"userString"] isKindOfClass:[NSString class]] ? plist[@"userString"] : nil;
+        id portalCode = plist[@"resultCode"];
+        BOOL invalidPortalCode = portalCode && (![portalCode respondsToSelector:@selector(integerValue)] || [portalCode integerValue] != 0);
+        BOOL portalFailure = error || !teams || invalidPortalCode || (teams.count == 0 && portalMessage.length > 0);
+        if (portalFailure && remainingRetries > 0) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)),
+                           dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                [self _loadTeamsAfterLoginWithResultCode:resultCode
+                                              credentials:credentials
+                                         remainingRetries:remainingRetries - 1
+                                               completion:completionHandler];
+            });
+            return;
+        }
+
+        if (portalFailure) {
+            NSString *failureReason = error.localizedDescription;
+            if (failureReason.length == 0) {
+                failureReason = portalMessage;
+            }
+            if (failureReason.length == 0) {
+                failureReason = @"The Developer account could not be loaded.";
+            }
+            // GrandSlam succeeded; this failure is in Developer Services.
+            failureReason = [NSString stringWithFormat:@"Apple sign-in completed, but Developer account setup failed: %@", failureReason];
+            completionHandler(failureReason, @"err", nil, nil);
+            return;
+        }
+
+        if (teams.count == 0) {
+            completionHandler(@"Please accept the Apple Developer terms at https://developer.apple.com",
+                              resultCode, teams, nil);
+            return;
+        }
+
+        completionHandler([plist objectForKey:@"userString"], resultCode, teams, credentials);
+    }];
 }
 
 - (void)validateLoginCode:(NSString*)code withCompletionHandler:(void (^)(NSString*, NSString*, NSArray*, NSURLCredential*))completionHandler {
@@ -80,21 +118,11 @@
          NSString *userString = [plist objectForKey:@"userString"];
 
          if ((!userString || [userString isEqualToString:@""]) && plist) {
-             // Get Team ID array
-             [[EEAppleServices sharedInstance] listTeamsWithCompletionHandler:^(NSError *error, NSDictionary *plist) {
-                  if (error) {
-                      completionHandler(error.localizedDescription, @"err", nil,nil);
-                      return;
-                  }
-
-                  NSArray *teams = [plist objectForKey:@"teams"];
-                  if (teams.count == 0) {
-                      completionHandler(@"Please accept the Apple Developer terms at https://developer.apple.com", resultCode, teams,nil);
-                  } else {
-                      NSString *userString = [plist objectForKey:@"userString"];
-                      completionHandler(userString, resultCode, teams, credentials);
-                  }
-              }];
+             // Retry the read-only lookup because the 2FA session is already consumed.
+             [self _loadTeamsAfterLoginWithResultCode:resultCode
+                                           credentials:credentials
+                                      remainingRetries:2
+                                            completion:completionHandler];
          } else if (plist) {
              completionHandler(userString, resultCode, nil, credentials);
          } else {
@@ -115,21 +143,10 @@
          NSString *userString = [plist objectForKey:@"userString"];
 
          if ((!userString || [userString isEqualToString:@""]) && plist) {
-             // Get Team ID array
-             [[EEAppleServices sharedInstance] listTeamsWithCompletionHandler:^(NSError *error, NSDictionary *plist) {
-                  if (error) {
-                      completionHandler(error.localizedDescription, @"err", nil,nil);
-                      return;
-                  }
-
-                  NSArray *teams = [plist objectForKey:@"teams"];
-                  if (teams.count == 0) {
-                      completionHandler(@"Please accept the Apple Developer terms at https://developer.apple.com", resultCode, teams,nil);
-                  } else {
-                      NSString *userString = [plist objectForKey:@"userString"];
-                      completionHandler(userString, resultCode, teams, credentials);
-                  }
-              }];
+             [self _loadTeamsAfterLoginWithResultCode:resultCode
+                                           credentials:credentials
+                                      remainingRetries:2
+                                            completion:completionHandler];
          } else if (plist) {
              completionHandler(userString, resultCode, nil, credentials);
          } else {

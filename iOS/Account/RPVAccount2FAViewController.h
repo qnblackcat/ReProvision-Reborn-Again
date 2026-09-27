@@ -18,4 +18,7 @@
 
 - (void)setupWithEmailAddress:(NSString*)emailAddress;
 
+- (IBAction)didTapConfirmButton:(id)sender;
+- (IBAction)didTapFallbackButton:(id)sender;
+
 @end

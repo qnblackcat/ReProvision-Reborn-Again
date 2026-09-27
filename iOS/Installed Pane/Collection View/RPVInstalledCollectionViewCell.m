@@ -187,7 +187,7 @@
         self.percentCompleteLabel.text = @"0% complete";
         self.percentCompleteLabel.font = [UIFont systemFontOfSize:IS_IPAD ? 14 : 12 weight:UIFontWeightMedium];
         self.percentCompleteLabel.hidden = YES;
-        self.percentCompleteLabel.textColor = [UIColor darkGrayColor];
+        self.percentCompleteLabel.textColor = [UIColor secondaryLabelColor];
         
         // MarqueeLabel specific
         self.percentCompleteLabel.fadeLength = 8.0;
@@ -206,9 +206,9 @@
         self.progressBar.progressCapType = kCGLineCapRound;
         self.progressBar.emptyCapType = kCGLineCapRound;
         self.progressBar.progressLineWidth = 1.5;
-        self.progressBar.progressColor = [UIColor darkGrayColor];
-        self.progressBar.progressStrokeColor = [UIColor darkGrayColor];
-        self.progressBar.emptyLineColor = [UIColor lightGrayColor];
+        self.progressBar.progressColor = self.tintColor;
+        self.progressBar.progressStrokeColor = self.tintColor;
+        self.progressBar.emptyLineColor = [UIColor separatorColor];
         self.progressBar.backgroundColor = [UIColor clearColor];
         
         self.progressBar.hidden = YES;
@@ -224,13 +224,13 @@
     }
     
     // Reset text colours if needed
-    self.displayNameLabel.textColor = [UIColor blackColor];
+    self.displayNameLabel.textColor = [UIColor labelColor];
     self.displayNameLabel.font = [UIFont systemFontOfSize:IS_IPAD ? 20 : 16 weight:UIFontWeightBold];
     self.displayNameLabel.textAlignment = NSTextAlignmentLeft;
     self.displayNameLabel.labelize = NO;
     
-    self.bundleIdentifierLabel.textColor = [UIColor darkGrayColor];
-    self.timeRemainingLabel.textColor = [UIColor grayColor];
+    self.bundleIdentifierLabel.textColor = [UIColor secondaryLabelColor];
+    self.timeRemainingLabel.textColor = [UIColor secondaryLabelColor];
     
     // Reset hidden state if needed
     self.smallIcon.hidden = NO;
@@ -278,7 +278,7 @@
         self.bundleIdentifier = [application bundleIdentifier];
         self.noApplicationsInThisSection = NO;
         
-        self.contentView.backgroundColor = [UIColor whiteColor];
+        self.contentView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
         
         dispatch_async(dispatch_get_global_queue( DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^(void){
             UIImage *icon = [application applicationIcon];

@@ -1,10 +1,12 @@
-## ReProvision Reborn
+## ReProvision Reborn… Again
 Re-sign applications on your device.
 
 This project aims at making it easier to (re-)sign iOS and Apple Watch applications on a **jailbroken** iOS device, allowing users to avoid the 7-day limit of free certificates associated with their normal Apple account.
 
 ### Maintenance status
 As of 2026, this fork is maintained with a conservative scope. The current focus is iOS support on jailbroken devices, issue triage, security-sensitive review, and compatibility fixes that can be verified by maintainers or contributors. Compatibility should be verified before assuming support for a specific iOS version, device, or jailbreak environment.
+
+**ReProvision Reborn… Again** is the rootless iOS 15+ compatibility release maintained by **b4db1r3**, with credit retained for the original ReProvision and ReProvision Reborn developers.
 
 tvOS and macOS are not a current maintenance focus for this fork. Changes in those areas may be accepted if they are well-tested, but users should not assume active support for those platforms.
 
@@ -28,7 +30,7 @@ reprovision://install?url=<IPA URL>
 ```
 
 ## Notes
-[The original project, ReProvision](https://github.com/Matchstic/ReProvision), has been EOL after Apple changed the process of application provisioning on their servers. This fork of ReProvision attempts to maintain the project and get it up-to-date with support for iOS 13 and above, which also explains the rename of the project.
+[The original project, ReProvision](https://github.com/Matchstic/ReProvision), reached end of life after Apple changed its application-provisioning services. This fork continues the project for modern jailbroken iOS environments.
 
 Although this is an attempt at resurrecting the project, I ask that you **do not bother** the original developer about specific updates made to **this** fork, since they're no longer behind the project.
 
@@ -53,12 +55,12 @@ Pull requests that add a focused feature, fix a reproducible bug, improve compat
 
 ## Building
 As long as you have standard libraries for Xcode projects, the only dependencies you need are [CocoaPods](https://github.com/CocoaPods/CocoaPods), [Git](https://git-scm.com/downloads), and [iOSOpenDev](https://github.com/Matchstic/iOSOpenDev.git). You can build the project with 3 simple steps
-1. ``git clone https://github.com/sohsatoh/ReProvision-Reborn.git``
+1. ``git clone https://github.com/bb91z/ReProvision-Reborn-Again.git``
 2. ``pod install`` in the project's root directory
 3. Open ``ReProvision.xcworkspace``, and roll from there
 
 ## License and Third-Party Libraries
-Licensed under the AGPLv3 license. This project occupies specific third-party libraries, which have all been listed (and given credit to) in this [notice](https://raw.githubusercontent.com/sohsatoh/ReProvision-Reborn/master/iOS/HTML/openSourceLicenses.html).
+Licensed under the AGPLv3 license. Included third-party libraries are listed and credited in the [open-source notices](iOS/HTML/openSourceLicenses.html).
 
 The software, ReProvision Reborn (and by extension, ``libReprovision`` as found in ``/Shared/``), and all consecutive copies of the software, are provided without warranty and AS-IS. **This project is NOT intended for piracy.**
 

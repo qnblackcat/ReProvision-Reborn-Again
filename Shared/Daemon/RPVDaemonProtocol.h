@@ -10,6 +10,9 @@
 
 - (void)applicationDidLaunch;
 - (void)applicationDidFinishTask;
+- (void)applicationRequestsSigningAssertion;
+- (void)applicationRequestsSigningAssertionWithIdentifier:(NSString *)identifier;
+- (void)applicationDidFinishSigningWithIdentifier:(NSString *)identifier;
 
 - (void)applicationRequestsDebuggingBackgroundSigning;
 - (void)applicationRequestsPreferencesUpdate;

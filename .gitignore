@@ -1,5 +1,7 @@
 LatestBuild/
 *.deb
+.DS_Store
+build/
 Working/
 *.dylib
 .theos/
@@ -9,9 +11,12 @@ iOS/CydiaPackages/
 Pods/
 Legacy/
 Output/
+/work/
 iOS/GoogleService-Info.plist
 iOS/Package/Applications/ReProvision.app/
 iOS/Package/usr/libexec/reprovisiond
+iOS/RootlessPackage/var/jb/Applications/ReProvision.app/
+iOS/RootlessPackage/var/jb/usr/libexec/reprovisiond
 *xcworkspace/xcuserdata/*
 *xcodeproj/xcuserdata/*
 *xcodeproj/project.xcworkspace/xcuserdata/*

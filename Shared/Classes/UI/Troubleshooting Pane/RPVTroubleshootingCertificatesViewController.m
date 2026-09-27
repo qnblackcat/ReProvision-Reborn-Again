@@ -42,7 +42,7 @@
 #if TARGET_OS_TV
     self.overlayView.backgroundColor = [UIColor whiteColor];
 #else
-    self.overlayView.backgroundColor = [UIColor groupTableViewBackgroundColor];
+    self.overlayView.backgroundColor = [UIColor systemGroupedBackgroundColor];
 #endif
     self.overlayView.hidden = YES;
     [self.view addSubview:self.overlayView];

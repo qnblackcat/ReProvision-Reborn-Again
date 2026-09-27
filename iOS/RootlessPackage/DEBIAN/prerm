@@ -1,0 +1,22 @@
+#!/bin/sh
+
+DAEMON_LABEL="jp.soh.reprovisiond"
+DAEMON_PLIST="/var/jb/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
+
+case "$1" in
+	remove|purge)
+		LAUNCHCTL=""
+		for candidate in /var/jb/bin/launchctl /var/jb/usr/bin/launchctl /bin/launchctl; do
+			if [ -x "$candidate" ]; then
+				LAUNCHCTL="$candidate"
+				break
+			fi
+		done
+		if [ -n "$LAUNCHCTL" ]; then
+			"$LAUNCHCTL" bootout "system/${DAEMON_LABEL}" 2>/dev/null || \
+				"$LAUNCHCTL" unload "$DAEMON_PLIST" 2>/dev/null || true
+		fi
+		;;
+esac
+
+exit 0

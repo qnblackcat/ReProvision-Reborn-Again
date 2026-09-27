@@ -34,7 +34,7 @@
     self.bodyLabel.text = @"App ID is the ID for each sideloaded application, issued by Apple's servers.\nWith a free account, you can only register up to 10 per 7 days.\nThis limit is on a per-account basis.\nAfter a week, it will automatically expire and you can install a new app.";
     self.bodyLabel.textAlignment = NSTextAlignmentCenter;
     self.bodyLabel.numberOfLines = 0;
-    self.bodyLabel.textColor = [UIColor blackColor];
+    self.bodyLabel.textColor = [UIColor labelColor];
     [self.bodyContainerView addSubview:self.bodyLabel];
 
     self.appIdsTableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];

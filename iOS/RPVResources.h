@@ -38,6 +38,7 @@
 + (NSString *)getTeamID;
 + (NSString *)getCredentialsVersion;
 + (void)storeUsername:(NSString *)username password:(NSString *)password andTeamID:(NSString *)teamId;
++ (void)migrateStoredCredentialsForBackgroundAccessIfPossible;
 
 + (void)userDidRequestAccountSignIn;
 + (void)userDidRequestAccountSignOut;

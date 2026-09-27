@@ -38,7 +38,7 @@
 
 - (void)loadView {
     self.view = [[UIView alloc] initWithFrame:CGRectZero];
-    self.view.backgroundColor = [UIColor whiteColor];
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
 }
 
 - (instancetype)initWithDocument:(NSString*)document {
@@ -56,6 +56,9 @@
     
     self.webView = [[WKWebView alloc] initWithFrame:CGRectZero];
     self.webView.navigationDelegate = self;
+    self.webView.opaque = NO;
+    self.webView.backgroundColor = [UIColor systemBackgroundColor];
+    self.webView.scrollView.backgroundColor = [UIColor systemBackgroundColor];
     [self.webView loadFileURL:url allowingReadAccessToURL:url];
     
     [self.view addSubview:self.webView];
