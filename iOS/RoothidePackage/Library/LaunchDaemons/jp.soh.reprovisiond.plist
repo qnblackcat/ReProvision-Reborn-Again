@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>jp.soh.reprovisiond</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/libexec/reprovisiond</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>_MSSafeMode</key>
+		<string>1</string>
+		<key>_SafeMode</key>
+		<string>1</string>
+	</dict>
+	<key>MachServices</key>
+	<dict>
+		<key>jp.soh.reprovisiond</key>
+		<true/>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>UserName</key>
+	<string>root</string>
+</dict>
+</plist>

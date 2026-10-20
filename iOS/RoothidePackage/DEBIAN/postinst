@@ -1,0 +1,32 @@
+#!/bin/sh
+
+# On roothide, maintainer scripts see the jailbreak root as / and the real
+# root filesystem under /rootfs. launchd resolves the jbroot-based daemon path.
+
+DAEMON_LABEL="jp.soh.reprovisiond"
+DAEMON_PLIST="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
+APP_PATH="/Applications/ReProvision.app"
+INBOX_SUBPATH="var/mobile/Library/Application Support/Containers/jp.soh.reprovision.ios/Documents/Inbox"
+
+for inbox in "/rootfs/${INBOX_SUBPATH}" "/${INBOX_SUBPATH}"; do
+	if [ -d "$inbox" ]; then
+		rm -rf -- "$inbox"
+	fi
+done
+
+chown root:wheel "$DAEMON_PLIST" 2>/dev/null || true
+chmod 0644 "$DAEMON_PLIST" 2>/dev/null || true
+
+if command -v launchctl >/dev/null 2>&1; then
+	launchctl bootout "system/${DAEMON_LABEL}" 2>/dev/null || \
+		launchctl unload "$DAEMON_PLIST" 2>/dev/null || true
+	launchctl bootstrap system "$DAEMON_PLIST" 2>/dev/null || \
+		launchctl load "$DAEMON_PLIST" 2>/dev/null || true
+	launchctl kickstart -k "system/${DAEMON_LABEL}" 2>/dev/null || true
+fi
+
+if command -v uicache >/dev/null 2>&1; then
+	uicache -p "$APP_PATH" 2>/dev/null || true
+fi
+
+exit 0

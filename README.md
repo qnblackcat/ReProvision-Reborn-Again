@@ -59,6 +59,8 @@ As long as you have standard libraries for Xcode projects, the only dependencies
 2. ``pod install`` in the project's root directory
 3. Open ``ReProvision.xcworkspace``, and roll from there
 
+For jailbreak packages, ``THEOS=... Scripts/build-rootless.sh`` builds the rootless (``/var/jb``) ``.deb``, and ``THEOS=... Scripts/build-roothide.sh`` additionally repackages the same binaries as a roothide (``iphoneos-arm64e``) ``.deb``. Both land in ``iOS/CydiaPackages``.
+
 ## License and Third-Party Libraries
 Licensed under the AGPLv3 license. Included third-party libraries are listed and credited in the [open-source notices](iOS/HTML/openSourceLicenses.html).
 

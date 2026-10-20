@@ -1,0 +1,20 @@
+#!/bin/sh
+
+# On roothide, maintainer scripts see the jailbreak root as /.
+
+DAEMON_LABEL="jp.soh.reprovisiond"
+DAEMON_PLIST="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
+
+case "$1" in
+	remove|purge)
+		if command -v launchctl >/dev/null 2>&1; then
+			launchctl bootout "system/${DAEMON_LABEL}" 2>/dev/null || \
+				launchctl unload "$DAEMON_PLIST" 2>/dev/null || true
+		fi
+		if command -v uicache >/dev/null 2>&1; then
+			uicache -u /Applications/ReProvision.app 2>/dev/null || true
+		fi
+		;;
+esac
+
+exit 0

@@ -1,0 +1,18 @@
+Package: com.yourepo.b4db1r3r3p0.reprovisionrebornagain
+Name: ReProvision Reborn… Again
+Version: 0.8.4-roothide.3
+Description: Re-sign applications directly on your roothide jailbroken device
+ This community-maintained build restores Apple account authentication,
+ trusted-device two-factor authentication, background signing, and modern
+ provisioning-profile handling for iOS 15 and newer.
+Section: Utilities
+Depends: firmware (>= 15.0), uikittools
+Priority: optional
+Conflicts: jp.soh.reprovision, com.matchstic.reprovision
+Replaces: jp.soh.reprovision
+Provides: jp.soh.reprovision
+Architecture: iphoneos-arm64e
+Author: Soh Satoh, Matt Clarke
+Maintainer: Soh Satoh, b4db1r3
+Homepage: https://github.com/bb91z/ReProvision-Reborn-Again
+Icon: file:///Applications/ReProvision.app/AppIcon60x60@2x.png
