@@ -50,6 +50,19 @@ static NSString *RPVCompatibleClientInfo(id value) {
         range:NSMakeRange(0, [value length]) withTemplate:@"com.apple.akd/1.0"];
 }
 
+// Returns the base64 X-Apple-I-MD-DATA GrandSlam sends when it wants an
+// anisette resync (Status.hsc == 434), or nil. Based on isideload PR #26.
+static NSString *RPVAnisetteResyncSIM(NSDictionary *response) {
+    NSDictionary *status = [response isKindOfClass:NSDictionary.class] ? response[@"Status"] : nil;
+    if (![status isKindOfClass:NSDictionary.class]) return nil;
+    id hsc = status[@"hsc"];
+    if (![hsc respondsToSelector:@selector(integerValue)] || [hsc integerValue] != 434) return nil;
+    id SIM = status[@"X-Apple-I-MD-DATA"];
+    if ([SIM isKindOfClass:NSData.class]) return [SIM length] ? [SIM base64EncodedStringWithOptions:0] : nil;
+    if ([SIM isKindOfClass:NSString.class]) return [SIM length] ? SIM : nil;
+    return nil;
+}
+
 static NSString *RPVDiagnosticClientKind(id value) {
     if (![value isKindOfClass:NSString.class] || [value length] == 0) return @"missing";
     if ([value rangeOfString:@"(com.apple.dt.Xcode/" options:NSCaseInsensitiveSearch].location != NSNotFound) return @"xcode";
@@ -545,9 +558,27 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     });
 }
 
+- (void)applyRemoteAnisetteHeaders:(NSDictionary *)headers userAgent:(NSString *)userAgent {
+    // GrandSlam answers -80045 when client info or User-Agent differ from the
+    // identity the anisette server emulates, so send both unchanged.
+    // Based on isideload PR #26 (iloader 2.3.7).
+    _anisetteDataOverride = [headers isKindOfClass:NSDictionary.class] ? [headers copy] : nil;
+    NSString *clientInfo = _anisetteDataOverride[@"X-MMe-Client-Info"];
+    if ([clientInfo isKindOfClass:NSString.class] && clientInfo.length > 0) {
+        _clientInfoOverride = [clientInfo copy];
+    }
+    if (userAgent.length > 0) {
+        self.userAgentOverride = userAgent;
+    }
+    RPV2FADiagnosticLog(@"client_info.remote", @{
+        @"client": RPVDiagnosticClientKind(_clientInfoOverride),
+        @"server_user_agent": @(userAgent.length > 0)
+    });
+}
+
 - (instancetype)init {
     self = [super init];
-    
+
     if (self) {
         self.clientInfoOverride = @"<MacBookPro11,5> <Mac OS X;10.14.6;18G103> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
         
@@ -726,7 +757,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     return @{
         @"X-MMe-Client-Info": self.clientInfoOverride,
         @"Content-Type": @"text/x-xml-plist",
-        @"User-Agent": RPVGrandSlamUserAgent,
+        @"User-Agent": self.userAgentOverride ?: RPVGrandSlamUserAgent,
         @"Accept": @"*/*"
     };
 }
@@ -975,7 +1006,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     // Sort out headers
     NSMutableDictionary<NSString *, NSString *> *httpHeaders = [@{
         @"Content-Type": @"text/x-xml-plist",
-        @"User-Agent": @"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
+        @"User-Agent": self.userAgentOverride ?: @"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
         @"Accept": @"text/x-xml-plist",
         @"Accept-Language": @"en-us",
         @"X-Apple-App-Info": @"com.apple.gs.xcode.auth",
@@ -1027,6 +1058,26 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
         }
     }];
     [task resume];
+}
+
+- (NSError *)_resyncAnisetteWithSIM:(NSString *)SIM {
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSDictionary *freshHeaders = nil;
+    __block NSError *resyncError = nil;
+    self.anisetteResyncHandler(SIM, ^(NSDictionary *headers, NSError *error) {
+        freshHeaders = headers;
+        resyncError = error;
+        dispatch_semaphore_signal(semaphore);
+    });
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    RPV2FADiagnosticLog(@"anisette.resync", @{@"succeeded": @(freshHeaders.count > 0 && !resyncError)});
+
+    if (freshHeaders.count == 0 || resyncError) {
+        return resyncError ?: [self createError:@"Apple asked to resync anisette, but the anisette server could not resync"
+                                               :RPVInternalLoginError];
+    }
+    [self applyRemoteAnisetteHeaders:freshHeaders userAgent:self.userAgentOverride];
+    return nil;
 }
 
 #pragma mark API
@@ -1103,31 +1154,50 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
             addStringToNegProt(di_info, di_ctx, "|");
             
             // Initial request to GSA
-            
-            dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-            __block NSDictionary *initResponse = nil;
-            [self _makeRequestWithParameters:@{
-                @"A2k": AData,
-                @"ps": ps,
-                @"cpd": clientData,
-                @"u": username,
-                @"o": @"init"
-            } diagnosticContext:diagnosticContext completion:^(NSError *err, NSDictionary *response) {
-                if (response) {
-                    initResponse = response;
-                } else {
-                    completionHandler(err, nil, nil, nil);
-                }
-                
-                dispatch_semaphore_signal(semaphore);
-            }];
-            dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-            
+
+            NSDictionary *(^sendInitRequest)(NSDictionary *) = ^NSDictionary *(NSDictionary *cpd) {
+                dispatch_semaphore_t initSemaphore = dispatch_semaphore_create(0);
+                __block NSDictionary *initResponse = nil;
+                [self _makeRequestWithParameters:@{
+                    @"A2k": AData,
+                    @"ps": ps,
+                    @"cpd": cpd,
+                    @"u": username,
+                    @"o": @"init"
+                } diagnosticContext:diagnosticContext completion:^(NSError *err, NSDictionary *response) {
+                    if (response) {
+                        initResponse = response;
+                    } else {
+                        completionHandler(err, nil, nil, nil);
+                    }
+
+                    dispatch_semaphore_signal(initSemaphore);
+                }];
+                dispatch_semaphore_wait(initSemaphore, DISPATCH_TIME_FOREVER);
+                return initResponse;
+            };
+            NSDictionary *initResponse = sendInitRequest(clientData);
+
             // Handle response
             if (!initResponse) {
                 return;
             }
-            
+
+            // GrandSlam may ask for fresh anisette (hsc 434); resync once and retry init.
+            NSString *resyncSIM = RPVAnisetteResyncSIM(initResponse);
+            if (resyncSIM && self.anisetteDataOverride.count > 0 && self.anisetteResyncHandler) {
+                NSError *resyncError = [self _resyncAnisetteWithSIM:resyncSIM];
+                if (resyncError) {
+                    completionHandler(resyncError, nil, nil, nil);
+                    return;
+                }
+                clientData = [self _grandSlamClientData];
+                initResponse = sendInitRequest(clientData);
+                if (!initResponse) {
+                    return;
+                }
+            }
+
             NSDictionary *initialResponseStatus = [initResponse objectForKey:@"Status"];
             if ([initialResponseStatus objectForKey:@"ec"] &&
                 [[initialResponseStatus objectForKey:@"ec"] intValue] != 0) {
@@ -1179,7 +1249,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
             
             
             // 'Complete' response to GSA
-            semaphore = dispatch_semaphore_create(0);
+            dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
             __block NSDictionary *completeResponse = nil;
             [self _makeRequestWithParameters:@{
                 @"c": respC,
@@ -1471,7 +1541,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
         base64EncodedStringWithOptions:0];
     NSMutableDictionary<NSString *, NSString *> *headers = [@{
         @"Content-Type": @"text/x-xml-plist",
-        @"User-Agent": @"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
+        @"User-Agent": self.userAgentOverride ?: @"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
         @"Accept": @"text/x-xml-plist",
         @"Accept-Language": @"en-us",
         @"X-Apple-App-Info": @"com.apple.gs.xcode.auth",

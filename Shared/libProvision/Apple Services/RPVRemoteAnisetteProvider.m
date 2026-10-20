@@ -4,10 +4,12 @@
 #import <corecrypto/ccsha2.h>
 
 static NSString *const RPVAnisetteErrorDomain = @"jp.soh.reprovision.anisette";
-static NSString *const RPVAnisetteProviderURL = @"https://ani.sidestore.io";
+// Supports anisette resync (sim), used by isideload/iloader.
+static NSString *const RPVAnisetteProviderURL = @"https://ani.jkcoxson.com";
 static NSString *const RPVAnisetteUUIDKey = @"RPVAnisetteLocalUserUUID";
-static NSString *const RPVAnisetteProvisioningKey = @"RPVAnisetteProvisioningInfo";
-static NSString *const RPVAnisetteRoutingInfoKey = @"RPVAnisetteRoutingInfo";
+// Provisioning from the previous server is not reused with this one.
+static NSString *const RPVAnisetteProvisioningKey = @"RPVAnisetteProvisioningInfo.jkcoxson";
+static NSString *const RPVAnisetteRoutingInfoKey = @"RPVAnisetteRoutingInfo.jkcoxson";
 
 static NSError *RPVAnisetteError(NSInteger code, NSString *description) {
     return [NSError errorWithDomain:RPVAnisetteErrorDomain
@@ -33,6 +35,7 @@ static NSString *RPVSHA256String(NSString *string) {
 @property (nonatomic, strong) NSUUID *localUserUUID;
 @property (nonatomic, copy) NSString *localUserID;
 @property (nonatomic, copy) NSString *clientInfo;
+@property (nonatomic, copy, readwrite) NSString *userAgent;
 @property (nonatomic, copy) NSData *cachedProvisioningInfo;
 @property (nonatomic, copy) NSString *cachedRoutingInfo;
 @property (nonatomic, strong) NSURLSessionWebSocketTask *openingWebSocketTask;
@@ -162,6 +165,8 @@ didCompleteWithError:(NSError *)error {
             completion(error ?: RPVAnisetteError(2, @"The anisette provider returned invalid client information"));
             return;
         }
+        NSString *userAgent = JSON[@"user_agent"] ?: JSON[@"userAgent"];
+        self.userAgent = [userAgent isKindOfClass:[NSString class]] && userAgent.length > 0 ? userAgent : nil;
         self.clientInfo = clientInfo;
         completion(nil);
     }] resume];
@@ -374,10 +379,23 @@ didCompleteWithError:(NSError *)error {
 - (void)requestHeadersWithProvisioningInfo:(NSData *)provisioningInfo
                                routingInfo:(NSString *)routingInfo
                                 completion:(void (^)(NSDictionary *headers, NSError *error))completion {
-    NSDictionary *body = @{
+    [self requestHeadersWithProvisioningInfo:provisioningInfo routingInfo:routingInfo SIM:nil completion:completion];
+}
+
+- (void)requestHeadersWithProvisioningInfo:(NSData *)provisioningInfo
+                               routingInfo:(NSString *)routingInfo
+                                       SIM:(NSString *)SIM
+                                completion:(void (^)(NSDictionary *headers, NSError *error))completion {
+    NSMutableDictionary *body = [@{
         @"identifier": [self.localUserUUIDData base64EncodedStringWithOptions:0],
         @"adi_pb": [provisioningInfo base64EncodedStringWithOptions:0]
-    };
+    } mutableCopy];
+    // A resync also needs the identity values GrandSlam saw. Based on isideload PR #26.
+    if (SIM.length > 0) {
+        body[@"sim"] = SIM;
+        body[@"device_id"] = self.localUserUUID.UUIDString;
+        body[@"md_lu"] = self.localUserID;
+    }
     NSError *error = nil;
     NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:&error];
     if (!bodyData) { completion(nil, error); return; }
@@ -485,6 +503,23 @@ didCompleteWithError:(NSError *)error {
 - (void)fetchAnisetteDataWithCompletion:(void (^)(NSDictionary<NSString *, NSString *> * _Nullable headers,
                                                    NSError * _Nullable error))completion {
     [self fetchAnisetteDataWithAttemptsRemaining:3 completion:completion];
+}
+
+- (void)resyncAnisetteDataWithSIM:(NSString *)SIM
+                       completion:(void (^)(NSDictionary<NSString *, NSString *> *headers,
+                                            NSError *error))completion {
+    [self fetchClientInfoWithCompletion:^(NSError *error) {
+        if (error) { completion(nil, error); return; }
+
+        // Resync keeps the identity the login started with; never reprovision here.
+        NSData *provisioningInfo = self.cachedProvisioningInfo;
+        NSString *routingInfo = self.cachedRoutingInfo;
+        if (provisioningInfo.length == 0 || routingInfo.length == 0) {
+            completion(nil, RPVAnisetteError(19, @"There is no anisette identity to resync"));
+            return;
+        }
+        [self requestHeadersWithProvisioningInfo:provisioningInfo routingInfo:routingInfo SIM:SIM completion:completion];
+    }];
 }
 
 @end

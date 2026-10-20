@@ -19,11 +19,18 @@
 // Block definitions
 typedef void (^RPVLoginResultBlock)(NSError *error, NSString *userIdentity, NSString *gsToken, NSString *idmsToken);
 typedef void (^RPVTwoFactorResultBlock)(NSError *error);
+typedef void (^RPVAnisetteResyncHandler)(NSString *SIM, void (^completion)(NSDictionary *headers, NSError *error));
 
 @interface RPVLoginImpl : NSObject
 
 @property (nonatomic, strong) NSString *clientInfoOverride;
 @property (nonatomic, strong) NSDictionary *anisetteDataOverride;
+@property (nonatomic, copy) NSString *userAgentOverride;
+// Regenerates remote anisette when GrandSlam asks for a resync (hsc 434).
+@property (nonatomic, copy) RPVAnisetteResyncHandler anisetteResyncHandler;
+
+// Uses the remote anisette identity exactly as the server describes it.
+- (void)applyRemoteAnisetteHeaders:(NSDictionary *)headers userAgent:(NSString *)userAgent;
 
 - (void)loginWithUsername:(NSString*)username password:(NSString*)password completion:(RPVLoginResultBlock)completionHandler;
 

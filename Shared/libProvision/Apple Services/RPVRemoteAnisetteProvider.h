@@ -16,8 +16,22 @@ NS_ASSUME_NONNULL_BEGIN
  */
 @property (nonatomic, assign, getter=isIdentityPinned) BOOL identityPinned;
 
+/**
+ User-Agent the anisette server pairs with its client info. GrandSlam rejects
+ logins (-80045) when these do not match the identity the server emulates.
+ */
+@property (nonatomic, copy, readonly, nullable) NSString *userAgent;
+
 - (void)fetchAnisetteDataWithCompletion:(void (^)(NSDictionary<NSString *, NSString *> * _Nullable headers,
                                                    NSError * _Nullable error))completion;
+
+/**
+ Regenerates headers for the current identity after GrandSlam asks for an
+ anisette resync (hsc 434), passing back the X-Apple-I-MD-DATA it returned.
+ */
+- (void)resyncAnisetteDataWithSIM:(NSString *)SIM
+                       completion:(void (^)(NSDictionary<NSString *, NSString *> * _Nullable headers,
+                                            NSError * _Nullable error))completion;
 
 @end
 

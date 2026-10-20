@@ -114,6 +114,11 @@
         self.loginImpl = [[RPVLoginImpl alloc] init];
         self.fallbackImpl = [[RPVLoginFallbackImpl alloc] initWithClientInfoOverride:self.loginImpl.clientInfoOverride];
         self.remoteAnisetteProvider = [[RPVRemoteAnisetteProvider alloc] init];
+
+        RPVRemoteAnisetteProvider *provider = self.remoteAnisetteProvider;
+        self.loginImpl.anisetteResyncHandler = ^(NSString *SIM, void (^completion)(NSDictionary *, NSError *)) {
+            [provider resyncAnisetteDataWithSIM:SIM completion:completion];
+        };
     }
 
     return self;
@@ -132,11 +137,8 @@
     if ([[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:remoteAnisetteVersion]) {
         [self.remoteAnisetteProvider fetchAnisetteDataWithCompletion:^(NSDictionary<NSString *,NSString *> *headers, NSError *error) {
             if (headers.count > 0 && !error) {
-                self.loginImpl.anisetteDataOverride = headers;
-                NSString *clientInfo = headers[@"X-MMe-Client-Info"];
-                if (clientInfo.length > 0) {
-                    self.loginImpl.clientInfoOverride = clientInfo;
-                }
+                [self.loginImpl applyRemoteAnisetteHeaders:headers
+                                                 userAgent:self.remoteAnisetteProvider.userAgent];
             }
             completion(error);
         }];
