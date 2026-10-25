@@ -3,18 +3,63 @@
 #import <corecrypto/ccdigest.h>
 #import <corecrypto/ccsha2.h>
 
+NSString *const RPVAnisetteServerPreferenceKey = @"anisetteServer";
+NSString *const RPVAnisetteCustomServerPreferenceKey = @"anisetteCustomServer";
+NSString *const RPVAnisetteCustomServerValue = @"custom";
+// Mac anisette server, iloader's default since 2.4.0.
+NSString *const RPVAnisetteDefaultServer = @"mac-ani.jkcoxson.com";
+
 static NSString *const RPVAnisetteErrorDomain = @"jp.soh.reprovision.anisette";
-// Supports anisette resync (sim), used by isideload/iloader.
-static NSString *const RPVAnisetteProviderURL = @"https://ani.jkcoxson.com";
 static NSString *const RPVAnisetteUUIDKey = @"RPVAnisetteLocalUserUUID";
-// Provisioning from the previous server is not reused with this one.
-static NSString *const RPVAnisetteProvisioningKey = @"RPVAnisetteProvisioningInfo.jkcoxson";
-static NSString *const RPVAnisetteRoutingInfoKey = @"RPVAnisetteRoutingInfo.jkcoxson";
+// ADI identities belong to the server that provisioned them, so they are
+// stored per server: "<prefix>.<host>".
+static NSString *const RPVAnisetteProvisioningKeyPrefix = @"RPVAnisetteProvisioningInfo";
+static NSString *const RPVAnisetteRoutingInfoKeyPrefix = @"RPVAnisetteRoutingInfo";
+static NSString *const RPVAnisetteStateDidResetNotification = @"RPVAnisetteStateDidResetNotification";
+static const NSInteger RPVAnisetteIdentityRejectedError = 20;
 
 static NSError *RPVAnisetteError(NSInteger code, NSString *description) {
     return [NSError errorWithDomain:RPVAnisetteErrorDomain
                                code:code
                            userInfo:@{NSLocalizedDescriptionKey: description ?: @"Anisette request failed"}];
+}
+
+// Accepts "host", "host:port/path" or a full https URL; returns nil if invalid.
+static NSString *RPVAnisetteNormalizedServerURL(id value) {
+    if (![value isKindOfClass:[NSString class]]) return nil;
+    NSString *string = [value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (string.length == 0) return nil;
+    if ([string rangeOfString:@"://"].location == NSNotFound) {
+        string = [@"https://" stringByAppendingString:string];
+    }
+    NSURLComponents *components = [NSURLComponents componentsWithString:string];
+    if (components.host.length == 0 ||
+        !([components.scheme isEqualToString:@"https"] || [components.scheme isEqualToString:@"http"])) {
+        return nil;
+    }
+    components.query = nil;
+    components.fragment = nil;
+    while ([components.path hasSuffix:@"/"]) {
+        components.path = [components.path substringToIndex:components.path.length - 1];
+    }
+    return components.string;
+}
+
+// Identifies a server in storage keys, e.g. "mac-ani.jkcoxson.com".
+static NSString *RPVAnisetteServerStorageName(NSString *serverURL) {
+    NSURLComponents *components = [NSURLComponents componentsWithString:serverURL];
+    NSString *name = components.host ?: serverURL;
+    if (components.port) name = [name stringByAppendingFormat:@":%@", components.port];
+    if (components.path.length > 0) name = [name stringByAppendingString:components.path];
+    return name;
+}
+
+static NSString *RPVAnisetteProvisioningKey(NSString *serverURL) {
+    return [NSString stringWithFormat:@"%@.%@", RPVAnisetteProvisioningKeyPrefix, RPVAnisetteServerStorageName(serverURL)];
+}
+
+static NSString *RPVAnisetteRoutingInfoKey(NSString *serverURL) {
+    return [NSString stringWithFormat:@"%@.%@", RPVAnisetteRoutingInfoKeyPrefix, RPVAnisetteServerStorageName(serverURL)];
 }
 
 static NSString *RPVSHA256String(NSString *string) {
@@ -34,6 +79,7 @@ static NSString *RPVSHA256String(NSString *string) {
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, strong) NSUUID *localUserUUID;
 @property (nonatomic, copy) NSString *localUserID;
+@property (nonatomic, copy) NSString *serverURL;
 @property (nonatomic, copy) NSString *clientInfo;
 @property (nonatomic, copy, readwrite) NSString *userAgent;
 @property (nonatomic, copy) NSData *cachedProvisioningInfo;
@@ -65,11 +111,70 @@ static NSString *RPVSHA256String(NSString *string) {
         // A cached ADI identity may already have a persisted GS token bound to
         // it from an earlier app launch. Treat it as pinned by default; a new
         // user-initiated login explicitly unpins it before GrandSlam starts.
-        self.cachedProvisioningInfo = [defaults dataForKey:RPVAnisetteProvisioningKey];
-        self.cachedRoutingInfo = [defaults stringForKey:RPVAnisetteRoutingInfoKey];
+        [self useCurrentServer];
         self.identityPinned = self.cachedProvisioningInfo.length > 0 && self.cachedRoutingInfo.length > 0;
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(storedStateDidReset:)
+                                                     name:RPVAnisetteStateDidResetNotification
+                                                   object:nil];
     }
     return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
++ (NSString *)currentServerURL {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    id selection = [defaults objectForKey:RPVAnisetteServerPreferenceKey];
+    if ([selection isEqual:RPVAnisetteCustomServerValue]) {
+        selection = [defaults objectForKey:RPVAnisetteCustomServerPreferenceKey];
+    }
+    return RPVAnisetteNormalizedServerURL(selection) ?: RPVAnisetteNormalizedServerURL(RPVAnisetteDefaultServer);
+}
+
++ (void)resetStoredStateForCurrentServer {
+    NSString *serverURL = [self currentServerURL];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults removeObjectForKey:RPVAnisetteProvisioningKey(serverURL)];
+    [defaults removeObjectForKey:RPVAnisetteRoutingInfoKey(serverURL)];
+    [defaults synchronize];
+    [[NSNotificationCenter defaultCenter] postNotificationName:RPVAnisetteStateDidResetNotification object:nil];
+}
+
+- (void)storedStateDidReset:(NSNotification *)notification {
+    @synchronized (self) {
+        // Reload everything for the current server on the next request.
+        self.serverURL = nil;
+        self.cachedProvisioningInfo = nil;
+        self.cachedRoutingInfo = nil;
+        self.identityPinned = NO;
+    }
+}
+
+// Switches to the server selected in settings, loading its stored identity.
+- (void)useCurrentServer {
+    NSString *serverURL = [RPVRemoteAnisetteProvider currentServerURL];
+    @synchronized (self) {
+        if ([serverURL isEqualToString:self.serverURL]) return;
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        self.serverURL = serverURL;
+        self.clientInfo = nil;
+        self.userAgent = nil;
+        self.cachedProvisioningInfo = [defaults dataForKey:RPVAnisetteProvisioningKey(serverURL)];
+        self.cachedRoutingInfo = [defaults stringForKey:RPVAnisetteRoutingInfoKey(serverURL)];
+    }
+}
+
+- (void)clearProvisioning {
+    self.cachedProvisioningInfo = nil;
+    self.cachedRoutingInfo = nil;
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults removeObjectForKey:RPVAnisetteProvisioningKey(self.serverURL)];
+    [defaults removeObjectForKey:RPVAnisetteRoutingInfoKey(self.serverURL)];
+    [defaults synchronize];
 }
 
 - (void)finishOpeningWebSocketTask:(NSURLSessionWebSocketTask *)task error:(NSError *)error {
@@ -109,7 +214,7 @@ didCompleteWithError:(NSError *)error {
 }
 
 - (void)openProvisioningWebSocketWithCompletion:(void (^)(NSURLSessionWebSocketTask *task, NSError *error))completion API_AVAILABLE(ios(13.0)) {
-    NSURL *URL = [NSURL URLWithString:[RPVAnisetteProviderURL stringByAppendingString:@"/v3/provisioning_session"]];
+    NSURL *URL = [NSURL URLWithString:[self.serverURL stringByAppendingString:@"/v3/provisioning_session"]];
     NSURLComponents *components = [NSURLComponents componentsWithURL:URL resolvingAgainstBaseURL:NO];
     components.scheme = @"wss";
     NSURLSessionWebSocketTask *task = [self.session webSocketTaskWithURL:components.URL];
@@ -152,7 +257,7 @@ didCompleteWithError:(NSError *)error {
         return;
     }
 
-    NSURL *URL = [NSURL URLWithString:[RPVAnisetteProviderURL stringByAppendingString:@"/v3/client_info"]];
+    NSURL *URL = [NSURL URLWithString:[self.serverURL stringByAppendingString:@"/v3/client_info"]];
     [[self.session dataTaskWithURL:URL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error || !data || [(NSHTTPURLResponse *)response statusCode] != 200) {
             completion(error ?: RPVAnisetteError(1, @"Could not fetch anisette client information"));
@@ -400,7 +505,7 @@ didCompleteWithError:(NSError *)error {
     NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:&error];
     if (!bodyData) { completion(nil, error); return; }
 
-    NSURL *URL = [NSURL URLWithString:[RPVAnisetteProviderURL stringByAppendingString:@"/v3/get_headers"]];
+    NSURL *URL = [NSURL URLWithString:[self.serverURL stringByAppendingString:@"/v3/get_headers"]];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL];
     request.HTTPMethod = @"POST";
     request.HTTPBody = bodyData;
@@ -412,6 +517,19 @@ didCompleteWithError:(NSError *)error {
             return;
         }
         NSDictionary *JSON = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+        if ([JSON isKindOfClass:[NSDictionary class]] && [self message:JSON hasResult:@"GetHeadersError"]) {
+            NSString *message = [JSON[@"message"] isKindOfClass:[NSString class]] ? JSON[@"message"] : @"unknown error";
+            // The server no longer accepts this identity, e.g. after it changed
+            // the device it emulates. Based on isideload's -45061 handling.
+            if ([message containsString:@"-45061"]) {
+                [self clearProvisioning];
+                completion(nil, RPVAnisetteError(RPVAnisetteIdentityRejectedError,
+                    @"The anisette server no longer recognizes this device identity. Sign out of ReProvision and sign in again."));
+                return;
+            }
+            completion(nil, RPVAnisetteError(21, [@"The anisette server could not generate headers: " stringByAppendingString:message]));
+            return;
+        }
         NSDictionary *headers = [self headersFromJSON:JSON routingInfo:routingInfo error:&error];
         completion(headers, error);
     }] resume];
@@ -427,8 +545,8 @@ didCompleteWithError:(NSError *)error {
         self.cachedProvisioningInfo = provisioningInfo;
         self.cachedRoutingInfo = routingInfo;
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-        [defaults setObject:provisioningInfo forKey:RPVAnisetteProvisioningKey];
-        [defaults setObject:routingInfo forKey:RPVAnisetteRoutingInfoKey];
+        [defaults setObject:provisioningInfo forKey:RPVAnisetteProvisioningKey(self.serverURL)];
+        [defaults setObject:routingInfo forKey:RPVAnisetteRoutingInfoKey(self.serverURL)];
         [defaults synchronize];
         [self requestHeadersWithProvisioningInfo:provisioningInfo routingInfo:routingInfo completion:completion];
     }];
@@ -443,8 +561,8 @@ didCompleteWithError:(NSError *)error {
         NSData *provisioningInfo = self.cachedProvisioningInfo;
         NSString *routingInfo = self.cachedRoutingInfo;
         if (provisioningInfo.length == 0 || routingInfo.length == 0) {
-            provisioningInfo = [defaults dataForKey:RPVAnisetteProvisioningKey];
-            routingInfo = [defaults stringForKey:RPVAnisetteRoutingInfoKey];
+            provisioningInfo = [defaults dataForKey:RPVAnisetteProvisioningKey(self.serverURL)];
+            routingInfo = [defaults stringForKey:RPVAnisetteRoutingInfoKey(self.serverURL)];
             self.cachedProvisioningInfo = provisioningInfo;
             self.cachedRoutingInfo = routingInfo;
         }
@@ -474,8 +592,8 @@ didCompleteWithError:(NSError *)error {
             // only before a fresh manual login has started GrandSlam.
             self.cachedProvisioningInfo = nil;
             self.cachedRoutingInfo = nil;
-            [defaults removeObjectForKey:RPVAnisetteProvisioningKey];
-            [defaults removeObjectForKey:RPVAnisetteRoutingInfoKey];
+            [defaults removeObjectForKey:RPVAnisetteProvisioningKey(self.serverURL)];
+            [defaults removeObjectForKey:RPVAnisetteRoutingInfoKey(self.serverURL)];
             [self provisionAndFetchWithCompletion:completion];
         }];
     }];
@@ -485,7 +603,10 @@ didCompleteWithError:(NSError *)error {
                                       completion:(void (^)(NSDictionary<NSString *, NSString *> *headers,
                                                            NSError *error))completion {
     [self fetchAnisetteDataOnceWithCompletion:^(NSDictionary<NSString *,NSString *> *headers, NSError *error) {
-        if (!error || headers.count > 0 || attempts <= 1) {
+        // A rejected identity must not be silently replaced while pinned.
+        BOOL identityRejected = [error.domain isEqualToString:RPVAnisetteErrorDomain] &&
+                                error.code == RPVAnisetteIdentityRejectedError;
+        if (!error || headers.count > 0 || attempts <= 1 || identityRejected) {
             completion(headers, error);
             return;
         }
@@ -502,12 +623,14 @@ didCompleteWithError:(NSError *)error {
 
 - (void)fetchAnisetteDataWithCompletion:(void (^)(NSDictionary<NSString *, NSString *> * _Nullable headers,
                                                    NSError * _Nullable error))completion {
+    [self useCurrentServer];
     [self fetchAnisetteDataWithAttemptsRemaining:3 completion:completion];
 }
 
 - (void)resyncAnisetteDataWithSIM:(NSString *)SIM
                        completion:(void (^)(NSDictionary<NSString *, NSString *> *headers,
                                             NSError *error))completion {
+    [self useCurrentServer];
     [self fetchClientInfoWithCompletion:^(NSError *error) {
         if (error) { completion(nil, error); return; }
 

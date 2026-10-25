@@ -10,6 +10,7 @@
 #import "AppDelegate.h"
 #import "RPVErrors.h"
 #import "RPVResources.h"
+#import "RPVRemoteAnisetteProvider.h"
 
 #include <notify.h>
 
@@ -44,6 +45,7 @@
 
         // Create specifiers!
         [testingSpecs addObjectsFromArray:[self _signingSpecifiers]];
+        [testingSpecs addObjectsFromArray:[self _anisetteSpecifiers]];
         [testingSpecs addObjectsFromArray:[self _errorHandlingSpecifiers]];
 
         _specifiers = testingSpecs;
@@ -100,6 +102,42 @@
     [threshold setProperty:@"A longer time between checks uses less battery, but has more risk that applications won't be re-signed before a reboot." forKey:@"staticTextMessage"];
 
     [array addObject:threshold];
+
+    return array;
+}
+
+- (NSArray *)_anisetteSpecifiers {
+    // Only iOS 17 and newer sign in with remote anisette.
+    NSOperatingSystemVersion remoteAnisetteVersion = {17, 0, 0};
+    if (![[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:remoteAnisetteVersion])
+        return @[];
+
+    NSMutableArray *array = [NSMutableArray array];
+
+    PSSpecifier *group = [PSSpecifier groupSpecifierWithName:@"Anisette Server"];
+    [group setProperty:@"Changing the server or resetting anisette discards the current device identity. Sign out and sign in again afterwards.\n\nThe custom server is used only when Custom is selected." forKey:@"footerText"];
+    [array addObject:group];
+
+    PSSpecifier *server = [PSSpecifier preferenceSpecifierNamed:@"Server" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:NSClassFromString(@"PSListItemsController") cell:PSLinkListCell edit:nil];
+    [server setProperty:@YES forKey:@"enabled"];
+    [server setProperty:RPVAnisetteDefaultServer forKey:@"default"];
+    server.values = @[RPVAnisetteDefaultServer, @"new.ani.sidestore.io", @"ani3.stikstore.app", @"ani.iloader.app", RPVAnisetteCustomServerValue];
+    server.titleDictionary = [NSDictionary dictionaryWithObjects:@[@"Jkcoxson (Mac)", @"SideStore (Mac)", @"StikStore (Mac)", @"iloader", @"Custom"] forKeys:server.values];
+    server.shortTitleDictionary = server.titleDictionary;
+    [server setProperty:RPVAnisetteServerPreferenceKey forKey:@"key"];
+    [server setProperty:@"Anisette data identifies ReProvision to Apple as a Mac. Try another server if sign-in keeps failing." forKey:@"staticTextMessage"];
+    [array addObject:server];
+
+    PSSpecifier *custom = [PSSpecifier preferenceSpecifierNamed:@"Custom" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSEditTextCell edit:nil];
+    [custom setProperty:RPVAnisetteCustomServerPreferenceKey forKey:@"key"];
+    [custom setProperty:@"ani.yourserver.com" forKey:@"placeholder"];
+    [custom setProperty:@YES forKey:@"isURL"];
+    [custom setProperty:@YES forKey:@"noAutoCorrect"];
+    [array addObject:custom];
+
+    PSSpecifier *reset = [PSSpecifier preferenceSpecifierNamed:@"Reset Anisette" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+    reset->action = @selector(resetAnisette:);
+    [array addObject:reset];
 
     return array;
 }
@@ -188,6 +226,8 @@
             return [NSNumber numberWithInt:2];
         } else if ([key isEqualToString:@"shouldAutoRevokeIfNeeded"]) {
             return [NSNumber numberWithBool:NO];
+        } else if ([key isEqualToString:RPVAnisetteServerPreferenceKey]) {
+            return RPVAnisetteDefaultServer;
         }
 
         return nil;
@@ -206,6 +246,23 @@
 /////////////////////////////////////////////////////////////////////////////////////
 // Button actions
 /////////////////////////////////////////////////////////////////////////////////////
+
+- (void)resetAnisette:(id)sender {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Reset Anisette?"
+                                                                   message:@"ReProvision will create a new device identity with the selected server. You will need to sign out and sign in again."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Reset" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [RPVRemoteAnisetteProvider resetStoredStateForCurrentServer];
+
+        UIAlertController *done = [UIAlertController alertControllerWithTitle:@"Anisette Reset"
+                                                                      message:@"Sign out and sign in again to use the new identity."
+                                                               preferredStyle:UIAlertControllerStyleAlert];
+        [done addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:done animated:YES completion:nil];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
 
 - (void)startBackgroundSign:(id)sender {
     if (self.backgroundSigningTestInProgress)

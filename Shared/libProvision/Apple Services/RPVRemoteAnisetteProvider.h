@@ -2,6 +2,13 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+// Preference keys for the user-selected anisette server.
+extern NSString *const RPVAnisetteServerPreferenceKey;
+extern NSString *const RPVAnisetteCustomServerPreferenceKey;
+// RPVAnisetteServerPreferenceKey value that selects the custom server.
+extern NSString *const RPVAnisetteCustomServerValue;
+extern NSString *const RPVAnisetteDefaultServer;
+
 /**
  Provides a persistent macOS ADI identity through the SideStore anisette v3
  protocol. The provider receives only ADI provisioning material and a random
@@ -21,6 +28,18 @@ NS_ASSUME_NONNULL_BEGIN
  logins (-80045) when these do not match the identity the server emulates.
  */
 @property (nonatomic, copy, readonly, nullable) NSString *userAgent;
+
+/**
+ The anisette server selected in settings, as an https URL without a trailing
+ slash. Falls back to RPVAnisetteDefaultServer when the selection is invalid.
+ */
++ (NSString *)currentServerURL;
+
+/**
+ Discards the ADI identity stored for the current server, so the next sign-in
+ provisions a new one. Existing Apple ID sessions stop working afterwards.
+ */
++ (void)resetStoredStateForCurrentServer;
 
 - (void)fetchAnisetteDataWithCompletion:(void (^)(NSDictionary<NSString *, NSString *> * _Nullable headers,
                                                    NSError * _Nullable error))completion;
