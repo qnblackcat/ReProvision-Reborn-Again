@@ -99,11 +99,15 @@
 - (void)_checkDevelopmentCertificates {
     self.titleLabel.text = @"Checking Signing Certificates";
     self.subtitleLabel.text = @"Verifying...";
+    self.activityIndicatorView.hidden = NO;
+    [self.activityIndicatorView startAnimating];
 
     // Check whether the user needs to revoke any existing codesigning certificate.
     [[EEAppleServices sharedInstance] listTeamsWithCompletionHandler:^(NSError *error, NSDictionary *dictionary) {
         if (error) {
-            // TODO: handle!
+            [self _showError:error withTitle:@"Could Not Check Your Account" retryAction:^{
+                [self _checkDevelopmentCertificates];
+            }];
             return;
         }
 
@@ -136,7 +140,10 @@
         if (isFreeUser) {
             [[EEAppleServices sharedInstance] listAllDevelopmentCertificatesForTeamID:self.teamId systemType:EESystemTypeiOS withCompletionHandler:^(NSError *error, NSDictionary *dictionary) {
                 if (error) {
-                    // TODO: Handle error!
+                    [self _showError:error withTitle:@"Could Not Check Certificates" retryAction:^{
+                        [self _checkDevelopmentCertificates];
+                    }];
+                    return;
                 }
 
                 // If the count of certs is > 1 existing profiles, we need the user to revoke one.
@@ -154,6 +161,28 @@
             [self _checkDeviceRegistration];
         }
     }];
+}
+
+// Shows an error instead of leaving the spinner running forever.
+- (void)_showError:(NSError *)error withTitle:(NSString *)title retryAction:(void (^)(void))retryAction {
+    dispatch_async(dispatch_get_main_queue(), ^() {
+        self.titleLabel.text = title;
+        self.subtitleLabel.text = @"";
+        [self.activityIndicatorView stopAnimating];
+        self.activityIndicatorView.hidden = YES;
+
+        NSString *message = error.localizedDescription.length > 0 ? error.localizedDescription : @"An unknown error occurred.";
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                       message:message
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+            [self _dismissAccountModal:nil];
+        }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Try Again" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            retryAction();
+        }]];
+        [self presentViewController:alert animated:YES completion:nil];
+    });
 }
 
 - (void)_setupUIForRevokingCertificates:(NSArray *)certificates {
@@ -315,25 +344,36 @@
         self.tableView.hidden = YES;
         self.certificatesExplanation.hidden = YES;
         self.activityIndicatorView.hidden = NO;
+        [self.activityIndicatorView startAnimating];
 
-        [self _revokeCertificate:[self.dataSource objectAtIndex:indexPath.row] withCompletion:^(NSError *error) {
-            if (!error) {
-                // Delete the row from the data source
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [self.tableView reloadData];
-
-                    [self.dataSource removeObjectAtIndex:indexPath.row];
-                    [tableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationFade];
-
-                    // Switch back to tableView if needed.
-                    if (self.dataSource.count > 1) {
+        NSDictionary *certificate = [self.dataSource objectAtIndex:indexPath.row];
+        [self _revokeCertificate:certificate withCompletion:^(NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (error) {
+                    // Show the error, then let the user pick a certificate again.
+                    NSString *message = error.localizedDescription.length > 0 ? error.localizedDescription : @"An unknown error occurred.";
+                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Could Not Remove Certificate"
+                                                                                   message:message
+                                                                            preferredStyle:UIAlertControllerStyleAlert];
+                    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
                         [self _setupUIForRevokingCertificates:self.dataSource];
-                    } else {
-                        // Otherwise, we're good to continue!
-                        [self _checkDeviceRegistration];
-                    }
-                });
-            }
+                    }]];
+                    [self presentViewController:alert animated:YES completion:nil];
+                    return;
+                }
+
+                // Update the data source before the table reloads from it.
+                [self.dataSource removeObject:certificate];
+                [self.tableView reloadData];
+
+                // Switch back to tableView if needed.
+                if (self.dataSource.count > 1) {
+                    [self _setupUIForRevokingCertificates:self.dataSource];
+                } else {
+                    // Otherwise, we're good to continue!
+                    [self _checkDeviceRegistration];
+                }
+            });
         }];
     }
 }
@@ -341,11 +381,13 @@
 
 - (void)_revokeCertificate:(NSDictionary *)certificate withCompletion:(void (^)(NSError *error))completionHandler {
     [[EEAppleServices sharedInstance] ensureSessionWithIdentity:self.identity gsToken:self.gsToken andCompletionHandler:^(NSError *error, NSDictionary *plist) {
-        if (!error) {
-            [[EEAppleServices sharedInstance] revokeCertificateForIdentifier:[certificate objectForKey:@"id"] andTeamID:self.teamId systemType:EESystemTypeiOS withCompletionHandler:^(NSError *error, NSDictionary *dictionary) {
-                completionHandler(error);
-            }];
+        if (error) {
+            completionHandler(error);
+            return;
         }
+        [[EEAppleServices sharedInstance] revokeCertificateForIdentifier:[certificate objectForKey:@"id"] andTeamID:self.teamId systemType:EESystemTypeiOS withCompletionHandler:^(NSError *error, NSDictionary *dictionary) {
+            completionHandler(error);
+        }];
     }];
 }
 

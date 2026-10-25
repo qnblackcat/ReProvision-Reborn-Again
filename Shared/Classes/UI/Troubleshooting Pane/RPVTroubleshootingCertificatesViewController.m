@@ -160,11 +160,13 @@
 
 - (void)_revokeCertificate:(NSDictionary *)certificate withCompletion:(void (^)(NSError *error))completionHandler {
     [[EEAppleServices sharedInstance] ensureSessionWithIdentity:[RPVResources getUsername] gsToken:[RPVResources getPassword] andCompletionHandler:^(NSError *error, NSDictionary *plist) {
-        if (!error) {
-            [[EEAppleServices sharedInstance] revokeCertificateForIdentifier:[certificate objectForKey:@"id"] andTeamID:[RPVResources getTeamID] systemType:EESystemTypeiOS withCompletionHandler:^(NSError *error, NSDictionary *dictionary) {
-                completionHandler(error);
-            }];
+        if (error) {
+            completionHandler(error);
+            return;
         }
+        [[EEAppleServices sharedInstance] revokeCertificateForIdentifier:[certificate objectForKey:@"id"] andTeamID:[RPVResources getTeamID] systemType:EESystemTypeiOS withCompletionHandler:^(NSError *error, NSDictionary *dictionary) {
+            completionHandler(error);
+        }];
     }];
 }
 

@@ -163,6 +163,18 @@ andCompletionHandler:(void (^)(NSError *, NSDictionary *))completionHandler {
         sessionConfig.timeoutIntervalForResource = 45.0;
         NSURLSession *session = [NSURLSession sessionWithConfiguration:sessionConfig delegate:nil delegateQueue:nil];
         NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *responseData, NSURLResponse *response, NSError *error) {
+            // JSON API calls such as DELETE certificates/{id} answer 204 with no
+            // body; that is success, not an unreadable response.
+            NSInteger statusCode = [response isKindOfClass:[NSHTTPURLResponse class]]
+                ? [(NSHTTPURLResponse *)response statusCode]
+                : 0;
+            if (!error && responseData.length == 0 && ![method isEqualToString:@"POST"] &&
+                statusCode >= 200 && statusCode < 300) {
+                [session finishTasksAndInvalidate];
+                completionHandler(nil, @{});
+                return;
+            }
+
             if (error || !responseData) {
                 NSError *requestError = error ?: [NSError errorWithDomain:NSURLErrorDomain
                                                                       code:NSURLErrorBadServerResponse
