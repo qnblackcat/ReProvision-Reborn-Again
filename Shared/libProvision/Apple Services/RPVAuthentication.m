@@ -29,6 +29,18 @@
 
 @implementation RPVAuthentication
 
+// iOS 17+ gets anisette from a server, unless the user chose the device's own
+// AuthKit anisette in settings.
+- (BOOL)_usesRemoteAnisette {
+#if TARGET_OS_SIMULATOR
+    return NO;
+#else
+    NSOperatingSystemVersion remoteAnisetteVersion = {17, 0, 0};
+    return [[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:remoteAnisetteVersion] &&
+           ![RPVRemoteAnisetteProvider usesDeviceAnisette];
+#endif
+}
+
 - (void)_clearTwoFactorSession {
     self.cachedUserIdentityFor2FA = nil;
     self.cachedIdmsTokenFor2FA = nil;
@@ -42,8 +54,7 @@
                    withCompletion:(void(^)(NSError *error, NSString *userIdentity, NSString *gsToken))completion {
 
 #if !TARGET_OS_SIMULATOR
-    NSOperatingSystemVersion nativeAuthKitVersion = {17, 0, 0};
-    if ([[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:nativeAuthKitVersion]) {
+    if ([self _usesRemoteAnisette]) {
         if (allowIdentityRecovery) {
             // A user-initiated login may replace stale ADI state before GrandSlam.
             [self _clearTwoFactorSession];
@@ -78,6 +89,9 @@
         return;
     }
 #endif
+
+    // Device anisette: drop anything left over from a previous remote server.
+    [self.loginImpl clearRemoteAnisetteOverrides];
 
     // Use fallback impl on iOS 9 only, due to missing corecrypto functionality
     NSOperatingSystemVersion version = {10, 0, 0};
@@ -133,8 +147,7 @@
 
 - (void)prepareAnisetteWithCompletion:(void(^)(NSError *error))completion {
 #if !TARGET_OS_SIMULATOR
-    NSOperatingSystemVersion remoteAnisetteVersion = {17, 0, 0};
-    if ([[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:remoteAnisetteVersion]) {
+    if ([self _usesRemoteAnisette]) {
         [self.remoteAnisetteProvider fetchAnisetteDataWithCompletion:^(NSDictionary<NSString *,NSString *> *headers, NSError *error) {
             if (headers.count > 0 && !error) {
                 [self.loginImpl applyRemoteAnisetteHeaders:headers
@@ -145,6 +158,8 @@
         return;
     }
 #endif
+    // Device anisette: drop anything left over from a previous remote server.
+    [self.loginImpl clearRemoteAnisetteOverrides];
     completion(nil);
 }
 

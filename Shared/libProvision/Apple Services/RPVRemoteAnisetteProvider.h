@@ -7,6 +7,9 @@ extern NSString *const RPVAnisetteServerPreferenceKey;
 extern NSString *const RPVAnisetteCustomServerPreferenceKey;
 // RPVAnisetteServerPreferenceKey value that selects the custom server.
 extern NSString *const RPVAnisetteCustomServerValue;
+// RPVAnisetteServerPreferenceKey value that uses the device's own AuthKit
+// anisette instead of a server (experimental on iOS 17+).
+extern NSString *const RPVAnisetteAuthKitValue;
 extern NSString *const RPVAnisetteDefaultServer;
 
 /**
@@ -30,10 +33,32 @@ extern NSString *const RPVAnisetteDefaultServer;
 @property (nonatomic, copy, readonly, nullable) NSString *userAgent;
 
 /**
+ Servers offered in the UI, in display order. Each entry has "value" (the host,
+ or RPVAnisetteCustomServerValue) and "title". Shared by Settings and sign-in.
+ */
++ (NSArray<NSDictionary<NSString *, NSString *> *> *)serverOptions;
+
+/**
+ Name of the selected server for display, e.g. "Jkcoxson (Mac)" or the custom host.
+ */
++ (NSString *)currentServerTitle;
+
+/**
+ Stores a server selection. Pass RPVAnisetteCustomServerValue together with a
+ host to select a custom server. Returns NO if the custom host is invalid.
+ */
++ (BOOL)selectServerValue:(NSString *)value customHost:(nullable NSString *)customHost;
+
+/**
  The anisette server selected in settings, as an https URL without a trailing
  slash. Falls back to RPVAnisetteDefaultServer when the selection is invalid.
  */
 + (NSString *)currentServerURL;
+
+/**
+ YES when the user chose the device's own AuthKit anisette instead of a server.
+ */
++ (BOOL)usesDeviceAnisette;
 
 /**
  Discards the ADI identity stored for the current server, so the next sign-in

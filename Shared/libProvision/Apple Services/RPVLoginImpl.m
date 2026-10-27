@@ -63,6 +63,9 @@ static NSString *RPVAnisetteResyncSIM(NSDictionary *response) {
     return nil;
 }
 
+// Client info used with the device's own AuthKit anisette.
+static NSString * const RPVDefaultClientInfo = @"<MacBookPro11,5> <Mac OS X;10.14.6;18G103> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+
 static NSString *RPVDiagnosticClientKind(id value) {
     if (![value isKindOfClass:NSString.class] || [value length] == 0) return @"missing";
     if ([value rangeOfString:@"(com.apple.dt.Xcode/" options:NSCaseInsensitiveSearch].location != NSNotFound) return @"xcode";
@@ -576,11 +579,20 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     });
 }
 
+- (void)clearRemoteAnisetteOverrides {
+    if (_anisetteDataOverride.count == 0 && self.userAgentOverride.length == 0)
+        return;
+    _anisetteDataOverride = nil;
+    self.userAgentOverride = nil;
+    self.clientInfoOverride = RPVDefaultClientInfo;
+    RPV2FADiagnosticLog(@"client_info.device", @{@"client": RPVDiagnosticClientKind(_clientInfoOverride)});
+}
+
 - (instancetype)init {
     self = [super init];
 
     if (self) {
-        self.clientInfoOverride = @"<MacBookPro11,5> <Mac OS X;10.14.6;18G103> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+        self.clientInfoOverride = RPVDefaultClientInfo;
         
 #if TARGET_OS_IOS
         // Create rng pointer

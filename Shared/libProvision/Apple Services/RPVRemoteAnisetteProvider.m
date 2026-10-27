@@ -6,6 +6,7 @@
 NSString *const RPVAnisetteServerPreferenceKey = @"anisetteServer";
 NSString *const RPVAnisetteCustomServerPreferenceKey = @"anisetteCustomServer";
 NSString *const RPVAnisetteCustomServerValue = @"custom";
+NSString *const RPVAnisetteAuthKitValue = @"authkit";
 // Mac anisette server, iloader's default since 2.4.0.
 NSString *const RPVAnisetteDefaultServer = @"mac-ani.jkcoxson.com";
 
@@ -126,13 +127,56 @@ static NSString *RPVSHA256String(NSString *string) {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
++ (NSArray<NSDictionary<NSString *, NSString *> *> *)serverOptions {
+    return @[
+        @{@"value": RPVAnisetteDefaultServer, @"title": @"Jkcoxson (Mac)"},
+        @{@"value": @"new.ani.sidestore.io", @"title": @"SideStore (Mac)"},
+        @{@"value": @"ani3.stikstore.app", @"title": @"StikStore (Mac)"},
+        @{@"value": @"ani.iloader.app", @"title": @"iloader"},
+        @{@"value": RPVAnisetteAuthKitValue, @"title": @"Device (AuthKit)"},
+        @{@"value": RPVAnisetteCustomServerValue, @"title": @"Custom"},
+    ];
+}
+
++ (NSString *)currentServerTitle {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *selection = [defaults stringForKey:RPVAnisetteServerPreferenceKey] ?: RPVAnisetteDefaultServer;
+    if ([selection isEqualToString:RPVAnisetteCustomServerValue]) {
+        NSURL *URL = [NSURL URLWithString:[self currentServerURL]];
+        return URL.host ?: @"Custom";
+    }
+    for (NSDictionary *option in [self serverOptions]) {
+        if ([option[@"value"] isEqualToString:selection]) return option[@"title"];
+    }
+    return @"Jkcoxson (Mac)";
+}
+
++ (BOOL)selectServerValue:(NSString *)value customHost:(NSString *)customHost {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if ([value isEqualToString:RPVAnisetteCustomServerValue]) {
+        if (!RPVAnisetteNormalizedServerURL(customHost)) return NO;
+        [defaults setObject:customHost forKey:RPVAnisetteCustomServerPreferenceKey];
+    }
+    [defaults setObject:value forKey:RPVAnisetteServerPreferenceKey];
+    [defaults synchronize];
+    return YES;
+}
+
 + (NSString *)currentServerURL {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     id selection = [defaults objectForKey:RPVAnisetteServerPreferenceKey];
     if ([selection isEqual:RPVAnisetteCustomServerValue]) {
         selection = [defaults objectForKey:RPVAnisetteCustomServerPreferenceKey];
+    } else if ([selection isEqual:RPVAnisetteAuthKitValue]) {
+        // Not a server; only reached if something asks for a URL anyway.
+        selection = RPVAnisetteDefaultServer;
     }
     return RPVAnisetteNormalizedServerURL(selection) ?: RPVAnisetteNormalizedServerURL(RPVAnisetteDefaultServer);
+}
+
++ (BOOL)usesDeviceAnisette {
+    id selection = [[NSUserDefaults standardUserDefaults] objectForKey:RPVAnisetteServerPreferenceKey];
+    return [selection isEqual:RPVAnisetteAuthKitValue];
 }
 
 + (void)resetStoredStateForCurrentServer {

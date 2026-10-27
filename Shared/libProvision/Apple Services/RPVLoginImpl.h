@@ -32,6 +32,9 @@ typedef void (^RPVAnisetteResyncHandler)(NSString *SIM, void (^completion)(NSDic
 // Uses the remote anisette identity exactly as the server describes it.
 - (void)applyRemoteAnisetteHeaders:(NSDictionary *)headers userAgent:(NSString *)userAgent;
 
+// Drops remote anisette state so requests use the device's own AuthKit data.
+- (void)clearRemoteAnisetteOverrides;
+
 - (void)loginWithUsername:(NSString*)username password:(NSString*)password completion:(RPVLoginResultBlock)completionHandler;
 
 - (void)requestTwoFactorCodeWithUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token mode:(int)mode andCompletion:(void (^)(NSError *error))completionHandler;

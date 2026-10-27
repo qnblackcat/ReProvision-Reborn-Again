@@ -1,6 +1,6 @@
 Package: com.yourepo.b4db1r3r3p0.reprovisionrebornagain
 Name: ReProvision Reborn… Again
-Version: 0.8.4-rootless.29
+Version: 0.8.4-rootless.30
 Description: Re-sign applications directly on your rootless jailbroken device
  This community-maintained build restores Apple account authentication,
  trusted-device two-factor authentication, background signing, and modern

@@ -12,11 +12,13 @@
 #import "RPVAccountFinalController.h"
 #import "RPVAccountChecker.h"
 #import "EEAppleServices.h"
+#import "RPVRemoteAnisetteProvider.h"
 
 @interface RPVAccountViewController ()
 
 @property (nonatomic, strong) NSArray *_interimTeamIDArray;
 @property (nonatomic, strong) NSURLCredential *credentials;
+@property (nonatomic, strong) UIButton *anisetteServerButton;
 @end
 
 @implementation RPVAccountViewController
@@ -53,6 +55,122 @@
         self.titleLabel.textColor = [UIColor blackColor];
         self.subtitleLabel.textColor = [UIColor blackColor];
     }
+
+    [self _addAnisetteServerButton];
+}
+
+#pragma mark - Anisette server
+
+// Remote anisette is only used on iOS 17 and newer.
+- (BOOL)_usesRemoteAnisette {
+    NSOperatingSystemVersion version = {17, 0, 0};
+    return [[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:version];
+}
+
+// Lets the user switch servers here, since a failing server can block sign-in
+// before they ever reach Settings.
+- (void)_addAnisetteServerButton {
+    if (![self _usesRemoteAnisette])
+        return;
+
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    button.titleLabel.font = [UIFont systemFontOfSize:15];
+    button.titleLabel.adjustsFontSizeToFitWidth = YES;
+    button.titleLabel.minimumScaleFactor = 0.7;
+    [button addTarget:self action:@selector(_didTapAnisetteServerButton:) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:button];
+    self.anisetteServerButton = button;
+
+    // Sit directly above the storyboard's Privacy Policy button.
+    UIView *anchor = nil;
+    for (UIView *subview in self.view.subviews) {
+        if ([subview isKindOfClass:[UIButton class]] && subview != button) {
+            NSString *title = [(UIButton *)subview titleForState:UIControlStateNormal];
+            if ([title isEqualToString:@"Privacy Policy"]) {
+                anchor = subview;
+                break;
+            }
+        }
+    }
+
+    NSMutableArray *constraints = [NSMutableArray arrayWithArray:@[
+        [button.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [button.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:16],
+        [button.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-16],
+    ]];
+    if (anchor) {
+        [constraints addObject:[button.bottomAnchor constraintEqualToAnchor:anchor.topAnchor constant:-4]];
+    } else if (@available(iOS 11.0, *)) {
+        [constraints addObject:[button.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-48]];
+    } else {
+        [constraints addObject:[button.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor constant:-48]];
+    }
+    [NSLayoutConstraint activateConstraints:constraints];
+
+    [self _updateAnisetteServerButtonTitle];
+}
+
+- (void)_updateAnisetteServerButtonTitle {
+    NSString *title = [NSString stringWithFormat:@"Anisette Server: %@", [RPVRemoteAnisetteProvider currentServerTitle]];
+    [self.anisetteServerButton setTitle:title forState:UIControlStateNormal];
+}
+
+- (void)_didTapAnisetteServerButton:(UIButton *)sender {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Anisette Server"
+                                                                   message:@"Try another server if sign-in keeps failing. If none of the servers work, use Device (AuthKit)."
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+
+    for (NSDictionary *option in [RPVRemoteAnisetteProvider serverOptions]) {
+        NSString *value = option[@"value"];
+        NSString *title = option[@"title"];
+        UIAlertAction *action = [UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            if ([value isEqualToString:RPVAnisetteCustomServerValue]) {
+                [self _promptForCustomAnisetteServer];
+            } else {
+                [RPVRemoteAnisetteProvider selectServerValue:value customHost:nil];
+                [self _updateAnisetteServerButtonTitle];
+            }
+        }];
+        [sheet addAction:action];
+    }
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Reset Anisette" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        [RPVRemoteAnisetteProvider resetStoredStateForCurrentServer];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+
+    // iPad presents action sheets as popovers.
+    sheet.popoverPresentationController.sourceView = sender;
+    sheet.popoverPresentationController.sourceRect = sender.bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)_promptForCustomAnisetteServer {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Custom Anisette Server"
+                                                                   message:@"Enter the server address."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+        textField.placeholder = @"ani.yourserver.com";
+        textField.keyboardType = UIKeyboardTypeURL;
+        textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        textField.autocorrectionType = UITextAutocorrectionTypeNo;
+        textField.text = [[NSUserDefaults standardUserDefaults] stringForKey:RPVAnisetteCustomServerPreferenceKey];
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Use Server" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *host = alert.textFields.firstObject.text;
+        if ([RPVRemoteAnisetteProvider selectServerValue:RPVAnisetteCustomServerValue customHost:host]) {
+            [self _updateAnisetteServerButtonTitle];
+        } else {
+            UIAlertController *invalid = [UIAlertController alertControllerWithTitle:@"Invalid Address"
+                                                                             message:@"Enter a server address such as ani.yourserver.com."
+                                                                      preferredStyle:UIAlertControllerStyleAlert];
+            [invalid addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:invalid animated:YES completion:nil];
+        }
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -60,6 +178,8 @@
     
     [self.navigationController.navigationBar setBackgroundImage:[UIImage new] forBarMetrics:UIBarMetricsDefault];
     [self.navigationController.navigationBar setShadowImage:[UIImage new]];
+
+    [self _updateAnisetteServerButtonTitle];
 }
 
 - (void)didReceiveMemoryWarning {

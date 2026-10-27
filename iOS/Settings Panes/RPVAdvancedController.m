@@ -121,11 +121,17 @@
     PSSpecifier *server = [PSSpecifier preferenceSpecifierNamed:@"Server" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:NSClassFromString(@"PSListItemsController") cell:PSLinkListCell edit:nil];
     [server setProperty:@YES forKey:@"enabled"];
     [server setProperty:RPVAnisetteDefaultServer forKey:@"default"];
-    server.values = @[RPVAnisetteDefaultServer, @"new.ani.sidestore.io", @"ani3.stikstore.app", @"ani.iloader.app", RPVAnisetteCustomServerValue];
-    server.titleDictionary = [NSDictionary dictionaryWithObjects:@[@"Jkcoxson (Mac)", @"SideStore (Mac)", @"StikStore (Mac)", @"iloader", @"Custom"] forKeys:server.values];
+    NSMutableArray *serverValues = [NSMutableArray array];
+    NSMutableArray *serverTitles = [NSMutableArray array];
+    for (NSDictionary *option in [RPVRemoteAnisetteProvider serverOptions]) {
+        [serverValues addObject:option[@"value"]];
+        [serverTitles addObject:option[@"title"]];
+    }
+    server.values = serverValues;
+    server.titleDictionary = [NSDictionary dictionaryWithObjects:serverTitles forKeys:serverValues];
     server.shortTitleDictionary = server.titleDictionary;
     [server setProperty:RPVAnisetteServerPreferenceKey forKey:@"key"];
-    [server setProperty:@"Anisette data identifies ReProvision to Apple as a Mac. Try another server if sign-in keeps failing." forKey:@"staticTextMessage"];
+    [server setProperty:@"Anisette data identifies ReProvision to Apple as a Mac. Try another server if sign-in keeps failing.\n\nIf none of the servers work, use Device (AuthKit). It uses this iPhone's own anisette instead of a server, and has been tested on iOS 17.1.1 only." forKey:@"staticTextMessage"];
     [array addObject:server];
 
     PSSpecifier *custom = [PSSpecifier preferenceSpecifierNamed:@"Custom" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSEditTextCell edit:nil];

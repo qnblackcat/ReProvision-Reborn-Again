@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.8.4-rootless.30 / v0.8.4-roothide.5
+
+### Changes
+
+- Added a **roothide** package (`iphoneos-arm64e`) alongside the rootless
+  package. Build it with `Scripts/build-roothide.sh`.
+- Fixed Apple ID sign-in failing with **-80045** on iOS 17. ReProvision now
+  sends the anisette server's own client info and User-Agent, matching the
+  fix in iloader 2.3.7.
+- Added anisette resync: when Apple asks for fresh anisette data during
+  sign-in, ReProvision resyncs with the server and retries once.
+- Added an **Anisette Server** choice in **Settings → Advanced** and on the
+  sign-in screen (iOS 17+): Jkcoxson (Mac, default), SideStore (Mac),
+  StikStore (Mac), iloader, a custom server, or **Device (AuthKit)**. Settings
+  also has a **Reset Anisette** button.
+- Added **Device (AuthKit)**, which uses this device's own anisette instead of
+  a server. If none of the servers work, use it.
+- Fixed re-signing failing with **The anisette provider returned incomplete
+  headers** after the anisette server changed the device it emulates.
+  ReProvision now discards the rejected identity and asks you to sign in
+  again.
+- Anisette server errors now show the server's own message instead of a
+  generic error.
+- Fixed the sign-in screen hanging after removing a certificate when the
+  account already had two, and show an error instead of a spinner that never
+  ends when checking teams or certificates fails.
+
+### Note
+
+After updating, or after changing the anisette server, **sign out and sign in
+again**: the login is tied to the anisette identity it was created with.
+
+Tested on an iPhone 15 Pro (iOS 17.1.1, roothide): sign-in and signing with an
+anisette server (the -80045 fix) and with Device (AuthKit). The certificate
+removal fix and the sign-in-screen server button have not been tested on a
+device yet. Device (AuthKit) has not been tested on other iOS versions. iOS 16
+and earlier always use on-device anisette and were not re-tested with this
+release.
+
 ## v0.8.4-rootless.28
 
 ### Changes
