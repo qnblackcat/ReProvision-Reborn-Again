@@ -4,9 +4,15 @@
 
 DAEMON_LABEL="jp.soh.reprovisiond"
 DAEMON_PLIST="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
+LOG_NAME="ReProvision-2FA-Debug.log"
 
 case "$1" in
 	remove|purge)
+		# Remove the sign-in debug log (and its fallback copy in the app
+		# container) from the real filesystem, which is under /rootfs.
+		rm -f -- "/rootfs/var/mobile/Documents/${LOG_NAME}" \
+			"/rootfs/var/mobile/Library/Application Support/Containers/jp.soh.reprovision.ios/Documents/${LOG_NAME}"
+
 		if command -v launchctl >/dev/null 2>&1; then
 			launchctl bootout "system/${DAEMON_LABEL}" 2>/dev/null || \
 				launchctl unload "$DAEMON_PLIST" 2>/dev/null || true

@@ -2,9 +2,14 @@
 
 DAEMON_LABEL="jp.soh.reprovisiond"
 DAEMON_PLIST="/var/jb/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
+LOG_NAME="ReProvision-2FA-Debug.log"
 
 case "$1" in
 	remove|purge)
+		# Remove the sign-in debug log (and its fallback copy in the app container).
+		rm -f -- "/var/mobile/Documents/${LOG_NAME}" \
+			"/var/mobile/Library/Application Support/Containers/jp.soh.reprovision.ios/Documents/${LOG_NAME}"
+
 		LAUNCHCTL=""
 		for candidate in /var/jb/bin/launchctl /var/jb/usr/bin/launchctl /bin/launchctl; do
 			if [ -x "$candidate" ]; then
