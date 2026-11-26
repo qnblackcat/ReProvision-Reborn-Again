@@ -13,12 +13,17 @@
 #import "RPVAccountChecker.h"
 #import "EEAppleServices.h"
 #import "RPVRemoteAnisetteProvider.h"
+#import "RPVLoginImpl.h"
 
 @interface RPVAccountViewController ()
 
 @property (nonatomic, strong) NSArray *_interimTeamIDArray;
 @property (nonatomic, strong) NSURLCredential *credentials;
 @property (nonatomic, strong) UIButton *anisetteServerButton;
+@property (nonatomic, strong) UISwitch *debugSwitch;
+@property (nonatomic, strong) UIButton *shareLogButton;
+@property (nonatomic, strong) UIButton *clearLogButton;
+@property (nonatomic, strong) UIStackView *logActionsRow;
 @end
 
 @implementation RPVAccountViewController
@@ -56,36 +61,97 @@
         self.subtitleLabel.textColor = [UIColor blackColor];
     }
 
-    [self _addAnisetteServerButton];
+    [self _addBottomControls];
+
+    // Tapping outside the text fields dismisses the keyboard, so the controls
+    // underneath it (e.g. the anisette server button) stay reachable.
+    UITapGestureRecognizer *dismissTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(_dismissKeyboard)];
+    dismissTap.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:dismissTap];
 }
 
-#pragma mark - Anisette server
+- (void)_dismissKeyboard {
+    [self.view endEditing:YES];
+}
 
-// Remote anisette is only used on iOS 17 and newer.
+#pragma mark - Bottom controls
+
+// Server selection is offered on iOS 15 and newer.
 - (BOOL)_usesRemoteAnisette {
-    NSOperatingSystemVersion version = {17, 0, 0};
-    return [[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:version];
+    return [RPVRemoteAnisetteProvider supportsServerSelection];
 }
 
-// Lets the user switch servers here, since a failing server can block sign-in
-// before they ever reach Settings.
-- (void)_addAnisetteServerButton {
-    if (![self _usesRemoteAnisette])
-        return;
+// Bottom controls: the anisette server button (a failing server can block
+// sign-in before the user reaches Settings) and the debug log switch.
+- (void)_addBottomControls {
+    NSMutableArray *rows = [NSMutableArray array];
 
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    button.translatesAutoresizingMaskIntoConstraints = NO;
-    button.titleLabel.font = [UIFont systemFontOfSize:15];
-    button.titleLabel.adjustsFontSizeToFitWidth = YES;
-    button.titleLabel.minimumScaleFactor = 0.7;
-    [button addTarget:self action:@selector(_didTapAnisetteServerButton:) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:button];
-    self.anisetteServerButton = button;
+    if ([self _usesRemoteAnisette]) {
+        // A tinted pill, so the server choice stands out from the plain links below it.
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+        button.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+        button.titleLabel.adjustsFontSizeToFitWidth = YES;
+        button.titleLabel.minimumScaleFactor = 0.7;
+        button.backgroundColor = [self.view.tintColor colorWithAlphaComponent:0.14];
+        button.layer.cornerRadius = 12;
+        button.clipsToBounds = YES;
+        button.contentEdgeInsets = UIEdgeInsetsMake(10, 20, 10, 20);
+        [button addTarget:self action:@selector(_didTapAnisetteServerButton:) forControlEvents:UIControlEventTouchUpInside];
+        self.anisetteServerButton = button;
+        [rows addObject:button];
+    }
+
+    UILabel *label = [UILabel new];
+    label.text = @"Debug log";
+    label.font = [UIFont systemFontOfSize:15];
+    if (@available(iOS 13.0, *)) {
+        label.textColor = [UIColor secondaryLabelColor];
+    } else {
+        label.textColor = [UIColor grayColor];
+    }
+
+    UISwitch *debugSwitch = [UISwitch new];
+    debugSwitch.on = [RPVLoginImpl diagnosticsEnabled];
+    [debugSwitch addTarget:self action:@selector(_didToggleDebugSwitch:) forControlEvents:UIControlEventValueChanged];
+    self.debugSwitch = debugSwitch;
+
+    UIButton *share = [UIButton buttonWithType:UIButtonTypeSystem];
+    [share setTitle:@"Share log" forState:UIControlStateNormal];
+    share.titleLabel.font = [UIFont systemFontOfSize:15];
+    [share addTarget:self action:@selector(_didTapShareLogButton:) forControlEvents:UIControlEventTouchUpInside];
+    self.shareLogButton = share;
+
+    UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem];
+    [clear setTitle:@"Clear" forState:UIControlStateNormal];
+    clear.titleLabel.font = [UIFont systemFontOfSize:15];
+    [clear addTarget:self action:@selector(_didTapClearLogButton:) forControlEvents:UIControlEventTouchUpInside];
+    self.clearLogButton = clear;
+
+    // The switch has its own row; Share/Clear sit below it and only show while it is on.
+    UIStackView *debugRow = [[UIStackView alloc] initWithArrangedSubviews:@[label, debugSwitch]];
+    debugRow.axis = UILayoutConstraintAxisHorizontal;
+    debugRow.alignment = UIStackViewAlignmentCenter;
+    debugRow.spacing = 10;
+    [rows addObject:debugRow];
+
+    UIStackView *logActionsRow = [[UIStackView alloc] initWithArrangedSubviews:@[share, clear]];
+    logActionsRow.axis = UILayoutConstraintAxisHorizontal;
+    logActionsRow.alignment = UIStackViewAlignmentCenter;
+    logActionsRow.spacing = 28;
+    self.logActionsRow = logActionsRow;
+    [rows addObject:logActionsRow];
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:rows];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.alignment = UIStackViewAlignmentCenter;
+    stack.spacing = 8;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:stack];
 
     // Sit directly above the storyboard's Privacy Policy button.
     UIView *anchor = nil;
     for (UIView *subview in self.view.subviews) {
-        if ([subview isKindOfClass:[UIButton class]] && subview != button) {
+        if ([subview isKindOfClass:[UIButton class]]) {
             NSString *title = [(UIButton *)subview titleForState:UIControlStateNormal];
             if ([title isEqualToString:@"Privacy Policy"]) {
                 anchor = subview;
@@ -95,30 +161,77 @@
     }
 
     NSMutableArray *constraints = [NSMutableArray arrayWithArray:@[
-        [button.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [button.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:16],
-        [button.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [stack.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:16],
+        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-16],
     ]];
     if (anchor) {
-        [constraints addObject:[button.bottomAnchor constraintEqualToAnchor:anchor.topAnchor constant:-4]];
+        [constraints addObject:[stack.bottomAnchor constraintEqualToAnchor:anchor.topAnchor constant:-4]];
     } else if (@available(iOS 11.0, *)) {
-        [constraints addObject:[button.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-48]];
+        [constraints addObject:[stack.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-48]];
     } else {
-        [constraints addObject:[button.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor constant:-48]];
+        [constraints addObject:[stack.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor constant:-48]];
     }
     [NSLayoutConstraint activateConstraints:constraints];
 
     [self _updateAnisetteServerButtonTitle];
+    [self _updateShareLogButton];
 }
 
+#pragma mark - Debug log
+
+- (void)_updateShareLogButton {
+    self.logActionsRow.hidden = !self.debugSwitch.on;
+}
+
+- (void)_didToggleDebugSwitch:(UISwitch *)sender {
+    [self.view endEditing:YES];
+    [RPVLoginImpl setDiagnosticsEnabled:sender.on];
+    [self _updateShareLogButton];
+}
+
+- (void)_didTapClearLogButton:(UIButton *)sender {
+    [self.view endEditing:YES];
+    [RPVLoginImpl clearDiagnosticsLog];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Log Cleared"
+                                                                   message:nil
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)_didTapShareLogButton:(UIButton *)sender {
+    [self.view endEditing:YES];
+    NSString *path = [RPVLoginImpl diagnosticsLogPath];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"No Log Yet"
+                                                                       message:@"Turn on Debug log, try to sign in or re-sign, then share the log"
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+
+    UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:@[[NSURL fileURLWithPath:path]]
+                                                                        applicationActivities:nil];
+    // iPad presents the share sheet as a popover.
+    share.popoverPresentationController.sourceView = sender;
+    share.popoverPresentationController.sourceRect = sender.bounds;
+    [self presentViewController:share animated:YES completion:nil];
+}
+
+#pragma mark - Anisette server
+
 - (void)_updateAnisetteServerButtonTitle {
-    NSString *title = [NSString stringWithFormat:@"Anisette Server: %@", [RPVRemoteAnisetteProvider currentServerTitle]];
+    if (!self.anisetteServerButton) return;
+    NSString *title = [NSString stringWithFormat:@"Anisette Server: %@  \u203A", [RPVRemoteAnisetteProvider currentServerTitle]];
     [self.anisetteServerButton setTitle:title forState:UIControlStateNormal];
 }
 
 - (void)_didTapAnisetteServerButton:(UIButton *)sender {
+    [self.view endEditing:YES];
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Anisette Server"
-                                                                   message:@"Try another server if sign-in keeps failing. If none of the servers work, use Device (AuthKit)."
+                                                                   message:@"Try another server if sign-in keeps failing\nYou can also change this in Settings > Advanced > Server"
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
 
     for (NSDictionary *option in [RPVRemoteAnisetteProvider serverOptions]) {
@@ -148,7 +261,7 @@
 
 - (void)_promptForCustomAnisetteServer {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Custom Anisette Server"
-                                                                   message:@"Enter the server address."
+                                                                   message:@"Enter the server address"
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
         textField.placeholder = @"ani.yourserver.com";
@@ -164,7 +277,7 @@
             [self _updateAnisetteServerButtonTitle];
         } else {
             UIAlertController *invalid = [UIAlertController alertControllerWithTitle:@"Invalid Address"
-                                                                             message:@"Enter a server address such as ani.yourserver.com."
+                                                                             message:@"Enter a server address such as ani.yourserver.com"
                                                                       preferredStyle:UIAlertControllerStyleAlert];
             [invalid addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
             [self presentViewController:invalid animated:YES completion:nil];

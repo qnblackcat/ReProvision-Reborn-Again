@@ -28,6 +28,8 @@
 
 // Opt-in diagnostics record response structure without sensitive values.
 static NSString * const RPV2FADiagnosticsEnabledKey = @"RPV2FADiagnosticsEnabled";
+// NSUserDefaults switch shown on the sign-in screen.
+static NSString * const RPV2FADiagnosticsUserEnabledKey = @"RPV2FADiagnosticsUserEnabled";
 static NSString * const RPV2FADiagnosticsLogPath = @"/var/mobile/Documents/ReProvision-2FA-Debug.log";
 static const unsigned long long RPV2FADiagnosticsMaximumBytes = 512 * 1024;
 
@@ -74,7 +76,8 @@ static NSString *RPVDiagnosticClientKind(id value) {
 }
 
 static BOOL RPV2FADiagnosticsEnabled(void) {
-    return [[NSBundle.mainBundle objectForInfoDictionaryKey:RPV2FADiagnosticsEnabledKey] boolValue];
+    return [[NSBundle.mainBundle objectForInfoDictionaryKey:RPV2FADiagnosticsEnabledKey] boolValue] ||
+           [[NSUserDefaults standardUserDefaults] boolForKey:RPV2FADiagnosticsUserEnabledKey];
 }
 
 // Retains the native compatibility behavior used by current release builds.
@@ -213,6 +216,26 @@ static NSDictionary *RPVGrandSlamRequestDiagnostics(NSDictionary *params, NSDict
     return summary;
 }
 
+// The log lives in /var/mobile/Documents when this process may write there
+// (true for the app on rootless and roothide installs). If not, fall back to the
+// app's own Documents folder, so logging works whatever the jailbreak.
+static NSString *RPV2FADiagnosticsResolvedLogPath(void) {
+    static NSString *path;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSFileManager *fileManager = NSFileManager.defaultManager;
+        NSString *directory = RPV2FADiagnosticsLogPath.stringByDeletingLastPathComponent;
+        [fileManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
+        if ([fileManager isWritableFileAtPath:directory]) {
+            path = RPV2FADiagnosticsLogPath;
+        } else {
+            NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject ?: NSTemporaryDirectory();
+            path = [documents stringByAppendingPathComponent:RPV2FADiagnosticsLogPath.lastPathComponent];
+        }
+    });
+    return path;
+}
+
 static void RPV2FADiagnosticLog(NSString *event, NSDictionary *fields) {
     if (!RPV2FADiagnosticsEnabled() || event.length == 0) {
         return;
@@ -239,18 +262,19 @@ static void RPV2FADiagnosticLog(NSString *event, NSDictionary *fields) {
 
     @synchronized (NSBundle.mainBundle) {
         NSFileManager *fileManager = NSFileManager.defaultManager;
-        NSString *directory = RPV2FADiagnosticsLogPath.stringByDeletingLastPathComponent;
+        NSString *logPath = RPV2FADiagnosticsResolvedLogPath();
+        NSString *directory = logPath.stringByDeletingLastPathComponent;
         [fileManager createDirectoryAtPath:directory
                withIntermediateDirectories:YES
                                 attributes:nil
                                      error:nil];
 
-        NSDictionary *attributes = [fileManager attributesOfItemAtPath:RPV2FADiagnosticsLogPath error:nil];
+        NSDictionary *attributes = [fileManager attributesOfItemAtPath:logPath error:nil];
         if ([attributes fileSize] > RPV2FADiagnosticsMaximumBytes) {
-            [fileManager removeItemAtPath:RPV2FADiagnosticsLogPath error:nil];
+            [fileManager removeItemAtPath:logPath error:nil];
         }
 
-        NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:RPV2FADiagnosticsLogPath];
+        NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:logPath];
         if (fileHandle) {
             @try {
                 [fileHandle seekToEndOfFile];
@@ -260,7 +284,7 @@ static void RPV2FADiagnosticLog(NSString *event, NSDictionary *fields) {
                 [fileHandle closeFile];
             }
         } else {
-            [line writeToFile:RPV2FADiagnosticsLogPath atomically:YES];
+            [line writeToFile:logPath atomically:YES];
         }
     }
 }
@@ -529,6 +553,51 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 @end
 
 @implementation RPVLoginImpl
+
++ (BOOL)diagnosticsEnabled {
+    return RPV2FADiagnosticsEnabled();
+}
+
++ (void)setDiagnosticsEnabled:(BOOL)enabled {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:enabled forKey:RPV2FADiagnosticsUserEnabledKey];
+    [defaults synchronize];
+    // Also share the switch through the app's preference domain, like other settings.
+    CFPreferencesSetValue((__bridge CFStringRef)RPV2FADiagnosticsUserEnabledKey, (__bridge CFPropertyListRef)@(enabled),
+                          CFSTR("jp.soh.reprovision.ios"), kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
+    CFPreferencesSynchronize(CFSTR("jp.soh.reprovision.ios"), kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
+    if (!enabled) {
+        [self clearDiagnosticsLog];
+    }
+}
+
++ (void)logDebugEvent:(NSString *)event fields:(NSDictionary *)fields {
+    RPV2FADiagnosticLog(event, fields);
+}
+
++ (NSDictionary *)debugFieldsForError:(NSError *)error {
+    if (![error isKindOfClass:NSError.class]) return @{};
+    return @{@"error_domain": error.domain ?: @"",
+             @"error_code": @(error.code),
+             @"error_description": error.localizedDescription ?: @""};
+}
+
++ (void)clearDiagnosticsLog {
+    @synchronized (NSBundle.mainBundle) {
+        NSFileManager *fileManager = NSFileManager.defaultManager;
+        // Also drop a copy left at the other candidate location.
+        NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        NSArray *paths = @[RPV2FADiagnosticsResolvedLogPath(), RPV2FADiagnosticsLogPath,
+                           documents ? [documents stringByAppendingPathComponent:RPV2FADiagnosticsLogPath.lastPathComponent] : @""];
+        for (NSString *path in paths) {
+            if (path.length > 0) [fileManager removeItemAtPath:path error:nil];
+        }
+    }
+}
+
++ (NSString *)diagnosticsLogPath {
+    return RPV2FADiagnosticsResolvedLogPath();
+}
 
 @synthesize clientInfoOverride = _clientInfoOverride;
 @synthesize anisetteDataOverride = _anisetteDataOverride;

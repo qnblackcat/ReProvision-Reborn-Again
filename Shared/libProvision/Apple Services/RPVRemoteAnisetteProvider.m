@@ -128,25 +128,47 @@ static NSString *RPVSHA256String(NSString *string) {
 }
 
 + (NSArray<NSDictionary<NSString *, NSString *> *> *)serverOptions {
-    return @[
-        @{@"value": RPVAnisetteDefaultServer, @"title": @"Jkcoxson (Mac)"},
-        @{@"value": @"new.ani.sidestore.io", @"title": @"SideStore (Mac)"},
-        @{@"value": @"ani3.stikstore.app", @"title": @"StikStore (Mac)"},
-        @{@"value": @"ani.iloader.app", @"title": @"iloader"},
-        @{@"value": RPVAnisetteAuthKitValue, @"title": @"Device (AuthKit)"},
-        @{@"value": RPVAnisetteCustomServerValue, @"title": @"Custom"},
+    // "name" is the short label; "title" adds the address for the pickers.
+    NSArray *servers = @[
+        @[RPVAnisetteDefaultServer, @"Jkcoxson (Mac)"],
+        @[@"new.ani.sidestore.io", @"SideStore (Mac)"],
+        @[@"ani3.stikstore.app", @"StikStore (Mac)"],
+        @[@"ani.iloader.app", @"iloader"],
     ];
+    NSMutableArray *options = [NSMutableArray array];
+    for (NSArray *server in servers) {
+        [options addObject:@{@"value": server[0], @"name": server[1],
+                             @"title": [NSString stringWithFormat:@"%@ · %@", server[1], server[0]]}];
+    }
+    // Device (AuthKit) is no longer offered (sign-in fails with -22410). It is
+    // listed only while already selected, so existing users keep working and can
+    // switch away.
+    if ([self usesDeviceAnisette]) {
+        [options addObject:@{@"value": RPVAnisetteAuthKitValue, @"name": @"Device (AuthKit)", @"title": @"Device (AuthKit)"}];
+    }
+    [options addObject:@{@"value": RPVAnisetteCustomServerValue, @"name": @"Custom", @"title": @"Custom"}];
+    return options;
+}
+
++ (BOOL)supportsServerSelection {
+    return [[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){15, 0, 0}];
+}
+
++ (NSString *)defaultServerValue {
+    // Device (AuthKit) anisette is rejected on iOS 16 (error 22410), so every
+    // supported system starts with a server until the user picks otherwise.
+    return RPVAnisetteDefaultServer;
 }
 
 + (NSString *)currentServerTitle {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSString *selection = [defaults stringForKey:RPVAnisetteServerPreferenceKey] ?: RPVAnisetteDefaultServer;
+    NSString *selection = [defaults stringForKey:RPVAnisetteServerPreferenceKey] ?: [self defaultServerValue];
     if ([selection isEqualToString:RPVAnisetteCustomServerValue]) {
         NSURL *URL = [NSURL URLWithString:[self currentServerURL]];
         return URL.host ?: @"Custom";
     }
     for (NSDictionary *option in [self serverOptions]) {
-        if ([option[@"value"] isEqualToString:selection]) return option[@"title"];
+        if ([option[@"value"] isEqualToString:selection]) return option[@"name"];
     }
     return @"Jkcoxson (Mac)";
 }
@@ -176,6 +198,7 @@ static NSString *RPVSHA256String(NSString *string) {
 
 + (BOOL)usesDeviceAnisette {
     id selection = [[NSUserDefaults standardUserDefaults] objectForKey:RPVAnisetteServerPreferenceKey];
+    if (!selection) selection = [self defaultServerValue];
     return [selection isEqual:RPVAnisetteAuthKitValue];
 }
 

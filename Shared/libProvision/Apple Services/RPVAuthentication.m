@@ -29,14 +29,13 @@
 
 @implementation RPVAuthentication
 
-// iOS 17+ gets anisette from a server, unless the user chose the device's own
-// AuthKit anisette in settings.
+// iOS 15+ gets anisette from a server by default. Choosing Device (AuthKit) in
+// settings uses the device's own anisette instead.
 - (BOOL)_usesRemoteAnisette {
 #if TARGET_OS_SIMULATOR
     return NO;
 #else
-    NSOperatingSystemVersion remoteAnisetteVersion = {17, 0, 0};
-    return [[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:remoteAnisetteVersion] &&
+    return [RPVRemoteAnisetteProvider supportsServerSelection] &&
            ![RPVRemoteAnisetteProvider usesDeviceAnisette];
 #endif
 }

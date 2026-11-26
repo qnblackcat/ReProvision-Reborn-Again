@@ -7,6 +7,7 @@
 //
 
 #import "EEAppleServices.h"
+#import "RPVLoginImpl.h"
 #import "AuthKit.h"
 #import "NSData+GZIP.h"
 #import "RPVAuthentication.h"
@@ -168,6 +169,13 @@ andCompletionHandler:(void (^)(NSError *, NSDictionary *))completionHandler {
             NSInteger statusCode = [response isKindOfClass:[NSHTTPURLResponse class]]
                 ? [(NSHTTPURLResponse *)response statusCode]
                 : 0;
+            NSMutableDictionary *debugFields = [@{@"action": request.URL.lastPathComponent ?: @"",
+                                                  @"method": method ?: @"",
+                                                  @"http_status": @(statusCode),
+                                                  @"response_bytes": @(responseData.length),
+                                                  @"retries_remaining": @(retriesRemaining)} mutableCopy];
+            [debugFields addEntriesFromDictionary:[RPVLoginImpl debugFieldsForError:error]];
+            [RPVLoginImpl logDebugEvent:@"developer_services.response" fields:debugFields];
             if (!error && responseData.length == 0 && ![method isEqualToString:@"POST"] &&
                 statusCode >= 200 && statusCode < 300) {
                 [session finishTasksAndInvalidate];
@@ -240,6 +248,14 @@ andCompletionHandler:(void (^)(NSError *, NSDictionary *))completionHandler {
                                                           code:NSURLErrorCannotParseResponse
                                                       userInfo:userInfo], nil);
                 } else {
+                    id resultCode = plist[@"resultCode"];
+                    id resultString = plist[@"resultString"];
+                    // JSON APIs (e.g. certificates) carry no resultCode, so only log it when present.
+                    NSMutableDictionary *resultFields = [@{@"action": request.URL.lastPathComponent ?: @"",
+                                                           @"has_result_code": @([resultCode isKindOfClass:NSNumber.class])} mutableCopy];
+                    if ([resultCode isKindOfClass:NSNumber.class]) resultFields[@"result_code"] = resultCode;
+                    if ([resultString isKindOfClass:NSString.class] && [resultString length] > 0) resultFields[@"result_string"] = resultString;
+                    [RPVLoginImpl logDebugEvent:@"developer_services.result" fields:resultFields];
                     // Hit the completion handler.
                     completionHandler(nil, plist);
                 }

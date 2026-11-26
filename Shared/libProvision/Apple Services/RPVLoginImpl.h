@@ -23,6 +23,19 @@ typedef void (^RPVAnisetteResyncHandler)(NSString *SIM, void (^completion)(NSDic
 
 @interface RPVLoginImpl : NSObject
 
+// Sign-in diagnostics log. It records the structure of Apple's responses, never
+// passwords or tokens. Off unless switched on here (or via Info.plist).
++ (BOOL)diagnosticsEnabled;
++ (void)setDiagnosticsEnabled:(BOOL)enabled;
++ (NSString *)diagnosticsLogPath;
+// Deletes the log. Turning the log off does this automatically.
++ (void)clearDiagnosticsLog;
+// Appends one event to the log when it is on. Used by sign-in and re-signing.
+// Never pass passwords, tokens or other secrets.
++ (void)logDebugEvent:(NSString *)event fields:(NSDictionary *)fields;
+// error_domain, error_code and error_description for an NSError (or {} for nil).
++ (NSDictionary *)debugFieldsForError:(NSError *)error;
+
 @property (nonatomic, strong) NSString *clientInfoOverride;
 @property (nonatomic, strong) NSDictionary *anisetteDataOverride;
 @property (nonatomic, copy) NSString *userAgentOverride;

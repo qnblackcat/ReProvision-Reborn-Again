@@ -61,6 +61,16 @@ extern NSString *const RPVAnisetteDefaultServer;
 + (BOOL)usesDeviceAnisette;
 
 /**
+ YES when this iOS version can sign in with a remote anisette server (iOS 15+).
+ */
++ (BOOL)supportsServerSelection;
+
+/**
+ Server value used until the user picks one (RPVAnisetteDefaultServer).
+ */
++ (NSString *)defaultServerValue;
+
+/**
  Discards the ADI identity stored for the current server, so the next sign-in
  provisions a new one. Existing Apple ID sessions stop working afterwards.
  */

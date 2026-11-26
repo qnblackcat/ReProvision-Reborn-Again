@@ -11,10 +11,11 @@
 #import "RPVErrors.h"
 #import "RPVResources.h"
 #import "RPVRemoteAnisetteProvider.h"
+#import "RPVLoginImpl.h"
 
 #include <notify.h>
 
-@interface RPVAdvancedController ()
+@interface RPVAdvancedController () <UIGestureRecognizerDelegate>
 @property (nonatomic, readwrite) int daemonNotificationToken;
 @property (nonatomic, strong) PSSpecifier *backgroundSigningTestSpecifier;
 @property (nonatomic, readwrite) BOOL backgroundSigningTestInProgress;
@@ -31,12 +32,28 @@
 
     [[self navigationItem] setTitle:@"Advanced"];
 
+    // Dismiss the keyboard (Custom anisette server) when tapping outside the field or dragging the list.
+    self.table.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    UITapGestureRecognizer *dismissTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(_dismissKeyboard)];
+    dismissTap.cancelsTouchesInView = NO;
+    dismissTap.delegate = self;
+    [self.table addGestureRecognizer:dismissTap];
+
     // Register token for daemon notifications.
     int status = notify_register_check("jp.soh.reprovision.ios/debugStartBackgroundSign", &_daemonNotificationToken);
     if (status != NOTIFY_STATUS_OK) {
         fprintf(stderr, "registration failed (%u)\n", status);
         return;
     }
+}
+
+- (void)_dismissKeyboard {
+    [self.view endEditing:YES];
+}
+
+// Leave taps on the text field itself alone, so it can still gain focus.
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    return ![touch.view isKindOfClass:[UITextField class]];
 }
 
 - (id)specifiers {
@@ -46,6 +63,7 @@
         // Create specifiers!
         [testingSpecs addObjectsFromArray:[self _signingSpecifiers]];
         [testingSpecs addObjectsFromArray:[self _anisetteSpecifiers]];
+        [testingSpecs addObjectsFromArray:[self _signInLogSpecifiers]];
         [testingSpecs addObjectsFromArray:[self _errorHandlingSpecifiers]];
 
         _specifiers = testingSpecs;
@@ -106,10 +124,65 @@
     return array;
 }
 
+- (NSArray *)_signInLogSpecifiers {
+    NSMutableArray *array = [NSMutableArray array];
+
+    PSSpecifier *group = [PSSpecifier groupSpecifierWithName:@"Debug Log"];
+    [group setProperty:[NSString stringWithFormat:@"Records sign-in and re-sign steps (including the bundle IDs of the apps you sign) and the structure of Apple's responses, to help find errors. It never contains passwords or tokens. Turning it off deletes the log.\n\nSaved to %@", [RPVLoginImpl diagnosticsLogPath]] forKey:@"footerText"];
+    [array addObject:group];
+
+    PSSpecifier *toggle = [PSSpecifier preferenceSpecifierNamed:@"Debug Log" target:self set:@selector(setDebugLog:specifier:) get:@selector(readDebugLog:) detail:nil cell:PSSwitchCell edit:nil];
+    [array addObject:toggle];
+
+    PSSpecifier *share = [PSSpecifier preferenceSpecifierNamed:@"Share Log" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+    share->action = @selector(shareSignInLog:);
+    [array addObject:share];
+
+    PSSpecifier *clear = [PSSpecifier preferenceSpecifierNamed:@"Clear Log" target:self set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
+    clear->action = @selector(clearSignInLog:);
+    [array addObject:clear];
+
+    return array;
+}
+
+- (id)readDebugLog:(PSSpecifier *)specifier {
+    return @([RPVLoginImpl diagnosticsEnabled]);
+}
+
+- (void)setDebugLog:(id)value specifier:(PSSpecifier *)specifier {
+    [RPVLoginImpl setDiagnosticsEnabled:[value boolValue]];
+}
+
+- (void)clearSignInLog:(id)sender {
+    [RPVLoginImpl clearDiagnosticsLog];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Log Cleared"
+                                                                   message:nil
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)shareSignInLog:(id)sender {
+    NSString *path = [RPVLoginImpl diagnosticsLogPath];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"No Log Yet"
+                                                                       message:@"Turn on Debug Log, try to sign in or re-sign, then share the log."
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+
+    UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:@[[NSURL fileURLWithPath:path]]
+                                                                        applicationActivities:nil];
+    // iPad presents the share sheet as a popover.
+    share.popoverPresentationController.sourceView = self.view;
+    share.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);
+    [self presentViewController:share animated:YES completion:nil];
+}
+
 - (NSArray *)_anisetteSpecifiers {
-    // Only iOS 17 and newer sign in with remote anisette.
-    NSOperatingSystemVersion remoteAnisetteVersion = {17, 0, 0};
-    if (![[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:remoteAnisetteVersion])
+    if (![RPVRemoteAnisetteProvider supportsServerSelection])
         return @[];
 
     NSMutableArray *array = [NSMutableArray array];
@@ -120,7 +193,7 @@
 
     PSSpecifier *server = [PSSpecifier preferenceSpecifierNamed:@"Server" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:NSClassFromString(@"PSListItemsController") cell:PSLinkListCell edit:nil];
     [server setProperty:@YES forKey:@"enabled"];
-    [server setProperty:RPVAnisetteDefaultServer forKey:@"default"];
+    [server setProperty:[RPVRemoteAnisetteProvider defaultServerValue] forKey:@"default"];
     NSMutableArray *serverValues = [NSMutableArray array];
     NSMutableArray *serverTitles = [NSMutableArray array];
     for (NSDictionary *option in [RPVRemoteAnisetteProvider serverOptions]) {
@@ -131,7 +204,7 @@
     server.titleDictionary = [NSDictionary dictionaryWithObjects:serverTitles forKeys:serverValues];
     server.shortTitleDictionary = server.titleDictionary;
     [server setProperty:RPVAnisetteServerPreferenceKey forKey:@"key"];
-    [server setProperty:@"Anisette data identifies ReProvision to Apple as a Mac. Try another server if sign-in keeps failing.\n\nIf none of the servers work, use Device (AuthKit). It uses this iPhone's own anisette instead of a server, and has been tested on iOS 17.1.1 only." forKey:@"staticTextMessage"];
+    [server setProperty:@"Anisette data identifies ReProvision to Apple as a Mac. Try another server if sign-in keeps failing.\n\nIf you were using Device (AuthKit), it is shown only until you pick a server. A new sign-in with it fails with error 22410." forKey:@"staticTextMessage"];
     [array addObject:server];
 
     PSSpecifier *custom = [PSSpecifier preferenceSpecifierNamed:@"Custom" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSEditTextCell edit:nil];

@@ -8,6 +8,7 @@
 
 #import "RPVApplicationSigning.h"
 #import "EEBackend.h"
+#import "RPVLoginImpl.h"
 #import "RPVApplication.h"
 #import "RPVApplicationDatabase.h"
 
@@ -50,6 +51,13 @@
 @end
 
 static RPVApplicationSigning *sharedInstance;
+
+// Debug log helper for the re-sign pipeline (only writes when Debug Log is on).
+static void RPVSigningLog(NSString *step, NSString *bundleIdentifier, NSError *error) {
+    NSMutableDictionary *fields = [@{@"step": step ?: @"", @"bundle_id": bundleIdentifier ?: @""} mutableCopy];
+    [fields addEntriesFromDictionary:[RPVLoginImpl debugFieldsForError:error]];
+    [RPVLoginImpl logDebugEvent:@"resign" fields:fields];
+}
 
 @implementation RPVApplicationSigning
 
@@ -107,6 +115,7 @@ static RPVApplicationSigning *sharedInstance;
 
         // Update install queue with new applications list
         self.installQueue = [applications mutableCopy];
+        [RPVLoginImpl logDebugEvent:@"resign.pipeline" fields:@{@"step": @"start", @"application_count": @(applications.count)}];
 
         //////////////////////////////////////////////////////////////////////////////////////
         // 2. Initiate signing for applications if applicable.
@@ -468,6 +477,8 @@ replaceOriginalAfterSuccess:(BOOL)replaceOriginalAfterSuccess
     NSString *originalBundleIdentifier = [[application bundleIdentifier] copy] ?: @"";
     BOOL replacesInstalledApplication = [application.class isEqual:[RPVApplication class]];
 
+    RPVSigningLog(@"begin", originalBundleIdentifier, nil);
+
     // Update progress to 10% for this application.
     for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
         [observer applicationSigningUpdateProgress:10 forBundleIdentifier:originalBundleIdentifier];
@@ -482,6 +493,7 @@ replaceOriginalAfterSuccess:(BOOL)replaceOriginalAfterSuccess
     NSError *error = nil;
 
     void (^finishCurrentApplicationWithError)(NSError *) = ^(NSError *pipelineError) {
+        RPVSigningLog(@"failed", originalBundleIdentifier, pipelineError);
         for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
             [observer applicationSigningDidEncounterError:pipelineError forBundleIdentifier:originalBundleIdentifier];
         }
@@ -503,6 +515,7 @@ replaceOriginalAfterSuccess:(BOOL)replaceOriginalAfterSuccess
     };
 
     void (^finishCurrentApplicationSuccessfully)(void) = ^{
+        RPVSigningLog(@"succeeded", originalBundleIdentifier, nil);
         if (self.installQueue.count > 0) {
             [self.installQueue removeObjectAtIndex:0];
         }
@@ -527,6 +540,8 @@ replaceOriginalAfterSuccess:(BOOL)replaceOriginalAfterSuccess
         return;
     }
 
+    RPVSigningLog(@"bundle_copied", originalBundleIdentifier, nil);
+
     // Update progress to 30% for this application.
     for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
         [observer applicationSigningUpdateProgress:30 forBundleIdentifier:originalBundleIdentifier];
@@ -542,6 +557,8 @@ replaceOriginalAfterSuccess:(BOOL)replaceOriginalAfterSuccess
             finishCurrentApplicationWithError(error);
             return;
         }
+
+        RPVSigningLog(@"signed", originalBundleIdentifier, nil);
 
         NSDictionary *signedInfo = [NSDictionary dictionaryWithContentsOfURL:
                                     [applicationBundleURL URLByAppendingPathComponent:@"Info.plist"]];
@@ -574,6 +591,8 @@ replaceOriginalAfterSuccess:(BOOL)replaceOriginalAfterSuccess
             finishCurrentApplicationWithError(err);
             return;
         }
+
+        RPVSigningLog(@"ipa_built", originalBundleIdentifier, nil);
 
         // Remove extracted files once the IPA has been built.
         [[NSFileManager defaultManager] removeItemAtURL:extractedArchiveURL error:nil];

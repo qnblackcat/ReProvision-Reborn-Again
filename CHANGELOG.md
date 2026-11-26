@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.8.4-rootless.30 / v0.8.4-roothide.5
+## v0.8.4-rootless.31 / v0.8.4-roothide.6
 
 ### Changes
 
@@ -12,11 +12,20 @@
 - Added anisette resync: when Apple asks for fresh anisette data during
   sign-in, ReProvision resyncs with the server and retries once.
 - Added an **Anisette Server** choice in **Settings → Advanced** and on the
-  sign-in screen (iOS 17+): Jkcoxson (Mac, default), SideStore (Mac),
-  StikStore (Mac), iloader, a custom server, or **Device (AuthKit)**. Settings
+  sign-in screen (iOS 15+): Jkcoxson (Mac, default), SideStore (Mac),
+  StikStore (Mac), iloader or a custom server. Settings
   also has a **Reset Anisette** button.
-- Added **Device (AuthKit)**, which uses this device's own anisette instead of
-  a server. If none of the servers work, use it.
+- **Device (AuthKit)** is no longer offered: a new sign-in with it fails with
+  error **22410** (confirmed on iOS 16). If you already use it, it stays in the
+  list so you can switch to a server, and your current session keeps working.
+- iOS 15 and 16 can now pick an anisette server too, and use Jkcoxson by
+  default. If you were signed in with Device (AuthKit) on iOS 16, **sign out
+  and sign in again**.
+- Added a **Debug log** switch with **Share log** and **Clear** buttons on the
+  sign-in screen and in **Settings → Advanced → Debug Log**. The log records
+  sign-in and re-sign steps (with the bundle IDs of the apps you sign) and the
+  structure of Apple's responses, never passwords or tokens, to help find
+  errors. Turning the switch off, or uninstalling ReProvision, deletes the log.
 - Fixed re-signing failing with **The anisette provider returned incomplete
   headers** after the anisette server changed the device it emulates.
   ReProvision now discards the rejected identity and asks you to sign in
@@ -35,9 +44,10 @@ again**: the login is tied to the anisette identity it was created with.
 Tested on an iPhone 15 Pro (iOS 17.1.1, roothide): sign-in and signing with an
 anisette server (the -80045 fix) and with Device (AuthKit). The certificate
 removal fix and the sign-in-screen server button have not been tested on a
-device yet. Device (AuthKit) has not been tested on other iOS versions. iOS 16
-and earlier always use on-device anisette and were not re-tested with this
-release.
+device yet. Device (AuthKit) has not been tested on other iOS versions. On an
+iPhone 12 (iOS 16.3.1, rootless), sign-in with Device (AuthKit) failed with
+-22410, and sign-in with the default server (Jkcoxson) works. iOS 15 has not
+been tested.
 
 ## v0.8.4-rootless.28
 
